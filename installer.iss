@@ -15,14 +15,16 @@ Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=lowest
 ArchitecturesInstallIn64BitMode=x64compatible
-CloseApplications=yes
-RestartApplications=yes
+CloseApplications=force
+CloseApplicationsFilter=*.exe
+RestartApplications=no
+AppMutex=JayPcAgentMutex
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"
 
 [Files]
-Source: "dist\JAY PC Agent\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "dist\JAY PC Agent\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion restartreplace uninsrestartdelete
 
 [Icons]
 Name: "{group}\JAY PC Agent"; Filename: "{app}\JAY PC Agent.exe"

@@ -43,6 +43,19 @@ try:
 except Exception:
     updater = None
 
+# Named mutex so the installer (Inno AppMutex=JayPcAgentMutex) can detect/close
+# a running instance during auto-update, and to enforce single-instance.
+_MUTEX_HANDLE = None
+def acquire_mutex():
+    global _MUTEX_HANDLE
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        _MUTEX_HANDLE = ctypes.windll.kernel32.CreateMutexW(None, False, "JayPcAgentMutex")
+    except Exception:
+        _MUTEX_HANDLE = None
+
 
 # ── Data dir / config ────────────────────────────────────────────────────────
 def data_dir() -> Path:
@@ -530,6 +543,7 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    acquire_mutex()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setStyleSheet(QSS)
