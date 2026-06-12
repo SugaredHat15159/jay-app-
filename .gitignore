@@ -5,11 +5,8 @@ __pycache__/
 *.pyd
 .Python
 *.egg-info/
-dist/
-build/
-*.spec
 
-# PyInstaller output
+# PyInstaller output (keep our hand-written jay-pc-agent.spec tracked)
 dist/
 build/
 
