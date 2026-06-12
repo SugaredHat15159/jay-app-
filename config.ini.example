@@ -5,7 +5,5 @@ username = jay-agent
 password = YOUR_BROKER_PASSWORD_HERE
 
 [agent]
-# Name shown in the tray tooltip
-name = JAY PC Agent
-# MQTT client ID (must be unique per device on the broker)
-client_id = jay-pc-agent-desktop
+name = laptop
+client_id = jay-pc-agent-laptop
