@@ -1,0 +1,11 @@
+[broker]
+host = 100.119.255.57
+port = 1884
+username = jay-agent
+password = YOUR_BROKER_PASSWORD_HERE
+
+[agent]
+# Name shown in the tray tooltip
+name = JAY PC Agent
+# MQTT client ID (must be unique per device on the broker)
+client_id = jay-pc-agent-desktop
