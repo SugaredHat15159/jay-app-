@@ -231,9 +231,10 @@ class AgentMQTT:
 
     def _on_connect(self, client, userdata, flags, rc, properties):
         if rc == 0:
-            client.subscribe("pc/command", qos=1)
+            client.subscribe("pc/command", qos=1)               # shared / broadcast
+            client.subscribe(f"pc/command/{self.name}", qos=1)  # this machine only
             self.bridge.status.emit(True, f"{self.host}:{self.port}")
-            self.bridge.activity.emit(f"Connected as '{self.name}' ({self.client_id})")
+            self.bridge.activity.emit(f"Connected as '{self.name}' -> pc/command/{self.name}")
             self._publish_status("online")
         else:
             self.bridge.status.emit(False, f"auth/connect failed (rc={rc})")
@@ -243,7 +244,9 @@ class AgentMQTT:
         self.bridge.status.emit(False, "disconnected — reconnecting")
 
     def _on_message(self, client, userdata, msg):
-        if not self.enabled or msg.topic != "pc/command":
+        if not self.enabled:
+            return
+        if msg.topic not in ("pc/command", f"pc/command/{self.name}"):
             return
         try:
             payload = json.loads(msg.payload.decode())
