@@ -1,12 +1,25 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_dynamic_libs, collect_data_files
 block_cipher = None
+
+# sounddevice ships the PortAudio shared library as package data; make sure
+# PyInstaller bundles it (and numpy's runtime).
+sd_bins = collect_dynamic_libs('sounddevice')
+sd_data = collect_data_files('sounddevice')
 
 a = Analysis(
     ['app.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=['paho.mqtt.client'],
+    binaries=sd_bins,
+    datas=sd_data,
+    hiddenimports=[
+        'paho.mqtt.client',
+        'pynput.keyboard._win32',
+        'pynput.mouse._win32',
+        'sounddevice',
+        'numpy',
+        'requests',
+    ],
     hookspath=[],
     runtime_hooks=[],
     excludes=[],

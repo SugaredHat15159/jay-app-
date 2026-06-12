@@ -43,6 +43,11 @@ try:
 except Exception:
     updater = None
 
+try:
+    import ptt
+except Exception:
+    ptt = None
+
 # Named mutex so the installer (Inno AppMutex=JayPcAgentMutex) can detect/close
 # a running instance during auto-update, and to enforce single-instance.
 _MUTEX_HANDLE = None
@@ -93,6 +98,12 @@ def load_config() -> configparser.ConfigParser:
                          "username": "jay-agent", "password": ""}
     if "agent" not in cfg:
         cfg["agent"] = {"name": "laptop", "client_id": "jay-pc-agent-laptop"}
+    if "ptt_enabled" not in cfg["agent"]:
+        cfg["agent"]["ptt_enabled"] = "false"
+    if "hotkey" not in cfg["agent"]:
+        cfg["agent"]["hotkey"] = "ctrl+alt+j"
+    if "stt" not in cfg:
+        cfg["stt"] = {"url": "http://100.119.255.57:8080/api/stt"}
     return cfg
 
 
@@ -265,6 +276,17 @@ class AgentMQTT:
         except Exception:
             pass
 
+    def publish_stt(self, text: str):
+        """Publish push-to-talk transcript into the normal NLP pipeline."""
+        try:
+            self.client.publish("stt/text",
+                                json.dumps({"text": text, "source": "pc",
+                                            "name": self.name}), qos=1)
+            return True
+        except Exception as exc:
+            self.bridge.activity.emit(f"PTT publish failed: {exc}")
+            return False
+
     def set_enabled(self, on: bool):
         self.enabled = on
         self._publish_status("enabled" if on else "disabled")
@@ -417,6 +439,16 @@ class SettingsPage(QWidget):
         form.addRow("Broker user", self.user)
         pw_row = QHBoxLayout(); pw_row.addWidget(self.pw); pw_row.addWidget(self.show_pw)
         form.addRow("Broker password", pw_row)
+
+        # ── voice / push-to-talk ──
+        agent = cfg["agent"]
+        self.ptt_enabled = QCheckBox("Enable push-to-talk")
+        self.ptt_enabled.setChecked(agent.get("ptt_enabled", "false").lower() == "true")
+        self.hotkey = QLineEdit(agent.get("hotkey", "ctrl+alt+j"))
+        self.stt_url = QLineEdit(cfg["stt"].get("url", "http://100.119.255.57:8080/api/stt"))
+        form.addRow("Push-to-talk", self.ptt_enabled)
+        form.addRow("Hold-to-talk hotkey", self.hotkey)
+        form.addRow("STT server URL", self.stt_url)
         lay.addLayout(form)
         ver = QHBoxLayout()
         ver.addWidget(QLabel(f"Version {__version__}"))
@@ -424,7 +456,8 @@ class SettingsPage(QWidget):
         self.upd_btn = QPushButton("Check for updates"); self.upd_btn.setObjectName("Ghost")
         ver.addWidget(self.upd_btn)
         lay.addLayout(ver)
-        lay.addWidget(QLabel("Push-to-talk and always-on wake word arrive in the next update."))
+        lay.addWidget(QLabel("Hold the hotkey to talk; release to send. "
+                             "Always-on wake word arrives in a future update."))
         save = QPushButton("Save"); save.clicked.connect(self.save)
         row = QHBoxLayout(); row.addStretch(1); row.addWidget(save); lay.addLayout(row)
         lay.addStretch(1)
@@ -437,6 +470,11 @@ class SettingsPage(QWidget):
         self.cfg["broker"]["port"] = self.port.text().strip() or "1884"
         self.cfg["broker"]["username"] = self.user.text().strip()
         self.cfg["broker"]["password"] = self.pw.text()
+        self.cfg["agent"]["ptt_enabled"] = "true" if self.ptt_enabled.isChecked() else "false"
+        self.cfg["agent"]["hotkey"] = self.hotkey.text().strip() or "ctrl+alt+j"
+        if "stt" not in self.cfg:
+            self.cfg["stt"] = {}
+        self.cfg["stt"]["url"] = self.stt_url.text().strip() or "http://100.119.255.57:8080/api/stt"
         save_config(self.cfg)
         self.on_save(self.cfg)
         QMessageBox.information(self, "Saved", "Settings saved \u2014 reconnecting to the broker.")
@@ -465,6 +503,7 @@ class MainWindow(QMainWindow):
 
         self.bridge = Bridge()
         self.agent = AgentMQTT(self.cfg, self.bridge, self.get_mappings)
+        self.ptt_ctl = None
 
         central = QWidget(); self.setCentralWidget(central)
         h = QHBoxLayout(central); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(0)
@@ -500,6 +539,7 @@ class MainWindow(QMainWindow):
 
         self.agent.start()
         self.check_updates(manual=False)  # silent check on launch
+        self._reconcile_ptt()
 
     # mappings shared between GUI and mqtt thread
     def get_mappings(self):
@@ -512,6 +552,43 @@ class MainWindow(QMainWindow):
 
     def apply_settings(self, cfg):
         self.agent.apply_config(cfg)
+        self._reconcile_ptt()
+
+    # ── push-to-talk ──
+    def _on_ptt_status(self, msg):
+        self.bridge.activity.emit(f"[PTT] {msg}")
+
+    def _on_ptt_text(self, text):
+        if self.agent.publish_stt(text):
+            self.bridge.activity.emit(f'[PTT] -> stt/text (source=pc): "{text}"')
+
+    def _reconcile_ptt(self):
+        enabled = self.cfg["agent"].get("ptt_enabled", "false").lower() == "true"
+        # tear down any existing listener first
+        if self.ptt_ctl is not None:
+            try:
+                self.ptt_ctl.stop()
+            except Exception:
+                pass
+            self.ptt_ctl = None
+        if not enabled:
+            return
+        if ptt is None:
+            self.bridge.activity.emit("[PTT] unavailable in this build")
+            return
+        url = self.cfg["stt"].get("url", "http://100.119.255.57:8080/api/stt")
+        hotkey = self.cfg["agent"].get("hotkey", "ctrl+alt+j")
+        self.ptt_ctl = ptt.PushToTalk(stt_url=url, on_text=self._on_ptt_text,
+                                      on_status=self._on_ptt_status, hotkey=hotkey)
+        self.ptt_ctl.start()
+
+    def closeEvent(self, event):
+        if self.ptt_ctl is not None:
+            try:
+                self.ptt_ctl.stop()
+            except Exception:
+                pass
+        super().closeEvent(event)
 
     @Slot(bool, str)
     def on_status(self, connected, detail):
