@@ -31,6 +31,21 @@ def normalize_key_name(name):
     return name
 
 
+def normalize_keycode(char, vk):
+    """Normalize a pynput KeyCode to a token.
+
+    With Ctrl/Alt held, Windows often delivers char=None or a control char, so
+    fall back to the virtual-key code for letters (A-Z=65-90) and digits (0-9=48-57).
+    """
+    if char and char.isalnum():
+        return char.lower()
+    if vk is not None and (65 <= vk <= 90 or 48 <= vk <= 57):
+        return chr(vk).lower()
+    if char:
+        return char.lower()
+    return ("vk%s" % vk) if vk is not None else "?"
+
+
 def parse_hotkey(spec):
     """'ctrl+alt+j' -> {'ctrl','alt','j'}."""
     return {normalize_key_name(p.strip()) for p in (spec or "").split("+") if p.strip()}
@@ -76,10 +91,8 @@ class PushToTalk:
         from pynput import keyboard
         if isinstance(key, keyboard.Key):
             return normalize_key_name(key.name)
-        try:
-            return normalize_key_name(key.char) if key.char else str(key).lower()
-        except Exception:
-            return str(key).lower()
+        # KeyCode: prefer char, fall back to virtual-key code (modifiers held -> char often None)
+        return normalize_keycode(getattr(key, "char", None), getattr(key, "vk", None))
 
     def start(self):
         if self.running:
