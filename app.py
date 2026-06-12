@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QListWidget,
     QListWidgetItem, QStackedWidget, QLabel, QTableWidget, QTableWidgetItem,
     QPushButton, QComboBox, QLineEdit, QHeaderView, QFormLayout, QPlainTextEdit,
-    QMessageBox, QAbstractItemView,
+    QMessageBox, QAbstractItemView, QCheckBox,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -202,19 +202,32 @@ class AgentMQTT:
     def __init__(self, cfg, bridge: Bridge, mappings_ref):
         self.bridge = bridge
         self.mappings_ref = mappings_ref          # callable returning current list
+        self.cfg = cfg
+        self.enabled = True
+        self.client = None
+        self._build()
+
+    def _build(self):
+        cfg = self.cfg
         self.host = cfg["broker"]["host"]
-        self.port = int(cfg["broker"]["port"])
+        self.port = int(cfg["broker"].get("port", "1884") or "1884")
         self.username = cfg["broker"]["username"]
         self.password = cfg["broker"]["password"]
         self.name = cfg["agent"].get("name", "laptop")
         self.client_id = cfg["agent"].get("client_id", f"jay-pc-agent-{self.name}")
-        self.enabled = True
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=self.client_id)
         if self.password:
             self.client.username_pw_set(self.username, self.password)
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
         self.client.on_message = self._on_message
+
+    def apply_config(self, cfg):
+        """Reconnect with new broker settings (called from Settings save)."""
+        self.stop()
+        self.cfg = cfg
+        self._build()
+        self.start()
 
     def _on_connect(self, client, userdata, flags, rc, properties):
         if rc == 0:
@@ -382,20 +395,25 @@ class MappingsPage(QWidget):
 
 
 class SettingsPage(QWidget):
-    def __init__(self, cfg, on_save_name):
+    def __init__(self, cfg, on_save):
         super().__init__()
-        self.cfg = cfg; self.on_save_name = on_save_name
+        self.cfg = cfg; self.on_save = on_save
         lay = QVBoxLayout(self); lay.setContentsMargins(28, 24, 28, 24); lay.setSpacing(14)
         title = QLabel("Settings"); title.setObjectName("PageTitle"); lay.addWidget(title)
         form = QFormLayout(); form.setSpacing(12)
         self.name = QLineEdit(cfg["agent"].get("name", "laptop"))
-        self.host = QLineEdit(cfg["broker"]["host"]); self.host.setEnabled(False)
-        self.port = QLineEdit(cfg["broker"]["port"]); self.port.setEnabled(False)
-        self.user = QLineEdit(cfg["broker"]["username"]); self.user.setEnabled(False)
+        self.host = QLineEdit(cfg["broker"]["host"])
+        self.port = QLineEdit(cfg["broker"]["port"])
+        self.user = QLineEdit(cfg["broker"]["username"])
+        self.pw = QLineEdit(cfg["broker"].get("password", "")); self.pw.setEchoMode(QLineEdit.Password)
+        self.show_pw = QCheckBox("show")
+        self.show_pw.toggled.connect(lambda on: self.pw.setEchoMode(QLineEdit.Normal if on else QLineEdit.Password))
         form.addRow("This PC's name", self.name)
         form.addRow("Broker host", self.host)
         form.addRow("Broker port", self.port)
         form.addRow("Broker user", self.user)
+        pw_row = QHBoxLayout(); pw_row.addWidget(self.pw); pw_row.addWidget(self.show_pw)
+        form.addRow("Broker password", pw_row)
         lay.addLayout(form)
         ver = QHBoxLayout()
         ver.addWidget(QLabel(f"Version {__version__}"))
@@ -412,9 +430,13 @@ class SettingsPage(QWidget):
         name = self.name.text().strip() or "laptop"
         self.cfg["agent"]["name"] = name
         self.cfg["agent"]["client_id"] = f"jay-pc-agent-{name}"
+        self.cfg["broker"]["host"] = self.host.text().strip()
+        self.cfg["broker"]["port"] = self.port.text().strip() or "1884"
+        self.cfg["broker"]["username"] = self.user.text().strip()
+        self.cfg["broker"]["password"] = self.pw.text()
         save_config(self.cfg)
-        self.on_save_name(name)
-        QMessageBox.information(self, "Saved", "Settings saved. Restart the app to re-register the new name.")
+        self.on_save(self.cfg)
+        QMessageBox.information(self, "Saved", "Settings saved \u2014 reconnecting to the broker.")
 
 
 class ActivityPage(QWidget):
@@ -460,7 +482,7 @@ class MainWindow(QMainWindow):
         # pages
         self.stack = QStackedWidget()
         self.mappings_page = MappingsPage(self.get_mappings, self.set_mappings)
-        self.settings_page = SettingsPage(self.cfg, self.on_name_changed)
+        self.settings_page = SettingsPage(self.cfg, self.apply_settings)
         self.activity_page = ActivityPage()
         self.stack.addWidget(self.mappings_page)
         self.stack.addWidget(self.settings_page)
@@ -485,8 +507,8 @@ class MainWindow(QMainWindow):
         with self._lock:
             self._mappings = list(rows)
 
-    def on_name_changed(self, name):
-        self.agent.name = name
+    def apply_settings(self, cfg):
+        self.agent.apply_config(cfg)
 
     @Slot(bool, str)
     def on_status(self, connected, detail):
