@@ -19,6 +19,8 @@ CloseApplications=force
 CloseApplicationsFilter=*.exe
 RestartApplications=no
 AppMutex=JayPcAgentMutex
+SetupIconFile=icon.ico
+UninstallDisplayIcon={app}\JAY PC Agent.exe
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"
