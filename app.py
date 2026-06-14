@@ -48,6 +48,11 @@ try:
 except Exception:
     ptt = None
 
+try:
+    import ww
+except Exception:
+    ww = None
+
 # Named mutex so the installer (Inno AppMutex=JayPcAgentMutex) can detect/close
 # a running instance during auto-update, and to enforce single-instance.
 _MUTEX_HANDLE = None
@@ -102,6 +107,10 @@ def load_config() -> configparser.ConfigParser:
         cfg["agent"]["ptt_enabled"] = "false"
     if "hotkey" not in cfg["agent"]:
         cfg["agent"]["hotkey"] = "ctrl+alt+j"
+    if "ww_enabled" not in cfg["agent"]:
+        cfg["agent"]["ww_enabled"] = "false"
+    if "ww_word" not in cfg["agent"]:
+        cfg["agent"]["ww_word"] = "hey_jarvis"
     if "stt" not in cfg:
         cfg["stt"] = {"url": "http://100.119.255.57:8080/api/stt"}
     return cfg
@@ -446,8 +455,17 @@ class SettingsPage(QWidget):
         self.ptt_enabled.setChecked(agent.get("ptt_enabled", "false").lower() == "true")
         self.hotkey = QLineEdit(agent.get("hotkey", "ctrl+alt+j"))
         self.stt_url = QLineEdit(cfg["stt"].get("url", "http://100.119.255.57:8080/api/stt"))
+        self.ww_enabled = QCheckBox("Enable wake word (always-on listening)")
+        self.ww_enabled.setChecked(agent.get("ww_enabled", "false").lower() == "true")
+        self.ww_word = QComboBox()
+        self.ww_word.addItems(["hey_jarvis", "alexa", "hey_mycroft", "hey_rhasspy"])
+        _w = agent.get("ww_word", "hey_jarvis")
+        if self.ww_word.findText(_w) >= 0:
+            self.ww_word.setCurrentText(_w)
         form.addRow("Push-to-talk", self.ptt_enabled)
         form.addRow("Hold-to-talk hotkey", self.hotkey)
+        form.addRow("Wake word", self.ww_enabled)
+        form.addRow("Wake phrase", self.ww_word)
         form.addRow("STT server URL", self.stt_url)
         lay.addLayout(form)
         ver = QHBoxLayout()
@@ -457,7 +475,8 @@ class SettingsPage(QWidget):
         ver.addWidget(self.upd_btn)
         lay.addLayout(ver)
         lay.addWidget(QLabel("Hold the hotkey to talk; release to send. "
-                             "Always-on wake word arrives in a future update."))
+                             "Wake word listens continuously while enabled and "
+                             "uses no CPU when off."))
         save = QPushButton("Save"); save.clicked.connect(self.save)
         row = QHBoxLayout(); row.addStretch(1); row.addWidget(save); lay.addLayout(row)
         lay.addStretch(1)
@@ -472,6 +491,8 @@ class SettingsPage(QWidget):
         self.cfg["broker"]["password"] = self.pw.text()
         self.cfg["agent"]["ptt_enabled"] = "true" if self.ptt_enabled.isChecked() else "false"
         self.cfg["agent"]["hotkey"] = self.hotkey.text().strip() or "ctrl+alt+j"
+        self.cfg["agent"]["ww_enabled"] = "true" if self.ww_enabled.isChecked() else "false"
+        self.cfg["agent"]["ww_word"] = self.ww_word.currentText().strip() or "hey_jarvis"
         if "stt" not in self.cfg:
             self.cfg["stt"] = {}
         self.cfg["stt"]["url"] = self.stt_url.text().strip() or "http://100.119.255.57:8080/api/stt"
@@ -504,6 +525,7 @@ class MainWindow(QMainWindow):
         self.bridge = Bridge()
         self.agent = AgentMQTT(self.cfg, self.bridge, self.get_mappings)
         self.ptt_ctl = None
+        self.ww_ctl = None
 
         central = QWidget(); self.setCentralWidget(central)
         h = QHBoxLayout(central); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(0)
@@ -540,6 +562,7 @@ class MainWindow(QMainWindow):
         self.agent.start()
         self.check_updates(manual=False)  # silent check on launch
         self._reconcile_ptt()
+        self._reconcile_ww()
 
     # mappings shared between GUI and mqtt thread
     def get_mappings(self):
@@ -553,6 +576,7 @@ class MainWindow(QMainWindow):
     def apply_settings(self, cfg):
         self.agent.apply_config(cfg)
         self._reconcile_ptt()
+        self._reconcile_ww()
 
     # ── push-to-talk ──
     def _on_ptt_status(self, msg):
@@ -582,10 +606,43 @@ class MainWindow(QMainWindow):
                                       on_status=self._on_ptt_status, hotkey=hotkey)
         self.ptt_ctl.start()
 
+    # ── wake word ──
+    def _on_ww_status(self, msg):
+        self.bridge.activity.emit(f"[WW] {msg}")
+
+    def _on_ww_text(self, text):
+        if self.agent.publish_stt(text):
+            self.bridge.activity.emit(f'[WW] -> stt/text (source=pc): "{text}"')
+
+    def _reconcile_ww(self):
+        enabled = self.cfg["agent"].get("ww_enabled", "false").lower() == "true"
+        # Always tear down first: stops the thread, closes the mic, frees the model.
+        if self.ww_ctl is not None:
+            try:
+                self.ww_ctl.stop()
+            except Exception:
+                pass
+            self.ww_ctl = None
+        if not enabled:
+            return  # nothing running -> zero CPU
+        if ww is None:
+            self.bridge.activity.emit("[WW] unavailable in this build")
+            return
+        url = self.cfg["stt"].get("url", "http://100.119.255.57:8080/api/stt")
+        word = self.cfg["agent"].get("ww_word", "hey_jarvis")
+        self.ww_ctl = ww.WakeWord(model=word, stt_url=url, on_wake_text=self._on_ww_text,
+                                  on_status=self._on_ww_status)
+        self.ww_ctl.start()
+
     def closeEvent(self, event):
         if self.ptt_ctl is not None:
             try:
                 self.ptt_ctl.stop()
+            except Exception:
+                pass
+        if self.ww_ctl is not None:
+            try:
+                self.ww_ctl.stop()
             except Exception:
                 pass
         super().closeEvent(event)
