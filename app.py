@@ -24,13 +24,14 @@ from pathlib import Path
 
 import paho.mqtt.client as mqtt
 
-from PySide6.QtCore import Qt, QObject, Signal, Slot, QTimer
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor
+from PySide6.QtCore import Qt, QObject, Signal, Slot, QTimer, QRectF
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QPen
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QListWidget,
     QListWidgetItem, QStackedWidget, QLabel, QTableWidget, QTableWidgetItem,
     QPushButton, QComboBox, QLineEdit, QHeaderView, QFormLayout, QPlainTextEdit,
-    QMessageBox, QAbstractItemView, QCheckBox,
+    QMessageBox, QAbstractItemView, QCheckBox, QFrame, QGridLayout, QScrollArea,
+    QSpinBox, QSizePolicy,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -114,6 +115,10 @@ def load_config() -> configparser.ConfigParser:
         cfg["agent"]["ww_word"] = "hey_jarvis"
     if "stt" not in cfg:
         cfg["stt"] = {"url": "http://100.119.255.57:8080/api/stt"}
+    if "ui" not in cfg:
+        cfg["ui"] = {"theme": "dark"}
+    if "theme" not in cfg["ui"]:
+        cfg["ui"]["theme"] = "dark"
     return cfg
 
 
@@ -311,6 +316,17 @@ class AgentMQTT:
             self.bridge.activity.emit(f"PTT publish failed: {exc}")
             return False
 
+    def publish_skill(self, skill: str, intent: str, data: dict = None):
+        """Send a structured request straight to a skill (mirrors the web skillReq)."""
+        try:
+            self.client.publish(f"skill/{skill}/request",
+                                json.dumps({"intent": intent, "data": data or {},
+                                            "source": "pc"}), qos=1)
+            return True
+        except Exception as exc:
+            self.bridge.activity.emit(f"skill publish failed: {exc}")
+            return False
+
     def set_enabled(self, on: bool):
         self.enabled = on
         self._publish_status("enabled" if on else "disabled")
@@ -332,33 +348,112 @@ class AgentMQTT:
 
 
 # ── GUI ──────────────────────────────────────────────────────────────────────
-QSS = """
-QMainWindow, QWidget { background: #14110d; color: #f2ebdc;
-    font-family: 'Segoe UI', sans-serif; font-size: 14px; }
-#Sidebar { background: #1a1610; border-right: 1px solid #2a2319; }
-#Sidebar QListWidget { background: transparent; border: none; outline: none; }
-#Sidebar QListWidget::item { padding: 12px 16px; border-radius: 8px; margin: 2px 8px; color: #b3a892; }
-#Sidebar QListWidget::item:selected { background: #2a2319; color: #e8a04c; }
-#Sidebar QListWidget::item:hover { background: #221c15; }
-#Brand { color: #e8a04c; font-size: 20px; font-weight: 700; padding: 18px 18px 8px; }
-#PageTitle { font-size: 22px; font-weight: 700; }
-#Muted { color: #8a8070; }
-QTableWidget { background: #1a1610; border: 1px solid #2a2319; border-radius: 8px;
-    gridline-color: #2a2319; selection-background-color: #2a2319; }
-QHeaderView::section { background: #221c15; color: #b3a892; padding: 8px;
-    border: none; border-bottom: 1px solid #2a2319; }
-QLineEdit, QComboBox { background: #221c15; border: 1px solid #2a2319; border-radius: 6px;
-    padding: 8px; color: #f2ebdc; }
-QLineEdit:focus, QComboBox:focus { border-color: #e8a04c; }
-QPushButton { background: #e8a04c; color: #1c130a; border: none; border-radius: 6px;
-    padding: 9px 16px; font-weight: 600; }
-QPushButton:hover { background: #f0b25e; }
-QPushButton#Ghost { background: transparent; color: #b3a892; border: 1px solid #2a2319; }
-QPushButton#Ghost:hover { border-color: #e07a5f; color: #e07a5f; }
-QPlainTextEdit { background: #1a1610; border: 1px solid #2a2319; border-radius: 8px;
-    color: #b3a892; font-family: 'Consolas', monospace; font-size: 12px; }
-#StatusDot { font-size: 13px; color: #7c715d; padding: 12px 18px; }
+# Color tokens ported from the web dashboard's CSS variables, so the app matches
+# the site exactly (espresso dark + paper light, amber accent).
+THEMES = {
+    "dark": dict(
+        bg="#14110d", bg2="#1a1610", elevated="#1e1913", surface="#221c15",
+        surface2="#2a2319", hover="#2f2820",
+        border="rgba(240,210,170,0.09)", border2="rgba(240,210,170,0.18)",
+        text="#f2ebdc", text2="#b3a892", text3="#7c715d",
+        accent="#e8a04c", accent2="#e07a3c", accent_soft="rgba(232,160,76,0.12)",
+        success="#8fb96b", danger="#e07a5f",
+    ),
+    "light": dict(
+        bg="#f3ede0", bg2="#efe8d8", elevated="#fffdf7", surface="#fffdf7",
+        surface2="#f6f0e3", hover="#efe8d8",
+        border="rgba(60,45,25,0.10)", border2="rgba(60,45,25,0.20)",
+        text="#2a2114", text2="#6b5d48", text3="#9a8c74",
+        accent="#cf7a28", accent2="#b85f24", accent_soft="rgba(207,122,40,0.10)",
+        success="#5e8c3e", danger="#c75a3f",
+    ),
+}
+ON_ACCENT = "#1c130a"  # dark ink on the amber gradient, both themes (matches web)
+TOK = dict(THEMES["dark"])  # live tokens; painted widgets (timer ring) read these
+
+
+def build_qss(theme: str) -> str:
+    t = THEMES.get(theme, THEMES["dark"])
+    TOK.clear(); TOK.update(t)
+    grad = f"qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 {t['accent']},stop:1 {t['accent2']})"
+    return f"""
+QMainWindow, QWidget {{ background: {t['bg']}; color: {t['text']};
+    font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; }}
+
+#Sidebar {{ background: {t['bg2']}; border-right: 1px solid {t['border']}; }}
+#Sidebar QListWidget {{ background: transparent; border: none; outline: none; }}
+#Sidebar QListWidget::item {{ padding: 11px 14px; border-radius: 11px; margin: 2px 10px;
+    color: {t['text2']}; }}
+#Sidebar QListWidget::item:selected {{ background: {t['accent_soft']}; color: {t['accent']}; }}
+#Sidebar QListWidget::item:hover:!selected {{ background: {t['hover']}; color: {t['text']}; }}
+#Logo {{ background: {grad}; color: {ON_ACCENT}; border-radius: 11px;
+    font-size: 20px; font-weight: 800; min-width: 38px; max-width: 38px;
+    min-height: 38px; max-height: 38px; qproperty-alignment: AlignCenter; }}
+#Brand {{ color: {t['text']}; font-size: 19px; font-weight: 800; }}
+#BrandSub {{ color: {t['text3']}; font-size: 10px; letter-spacing: 3px; }}
+
+#PageTitle {{ font-size: 26px; font-weight: 800; color: {t['text']}; }}
+#Eyebrow {{ color: {t['accent']}; font-family: 'Consolas', monospace; font-size: 11px;
+    letter-spacing: 3px; }}
+#GroupTitle {{ color: {t['text3']}; font-family: 'Consolas', monospace; font-size: 11px;
+    letter-spacing: 2px; }}
+#Muted {{ color: {t['text3']}; }}
+#CardTitle {{ color: {t['text3']}; font-family: 'Consolas', monospace; font-size: 11px;
+    letter-spacing: 2px; }}
+
+#Card {{ background: {t['surface']}; border: 1px solid {t['border']}; border-radius: 16px; }}
+#TimerCard {{ background: {t['elevated']}; border: 1px solid {t['border']}; border-radius: 11px; }}
+#TimerCard[ringing="true"] {{ border: 1px solid {t['accent']}; }}
+#TimerLabel {{ color: {t['text2']}; font-weight: 600; }}
+
+QTableWidget {{ background: {t['elevated']}; border: 1px solid {t['border']}; border-radius: 11px;
+    gridline-color: {t['border']}; selection-background-color: {t['surface2']}; }}
+QHeaderView::section {{ background: {t['surface2']}; color: {t['text2']}; padding: 8px;
+    border: none; border-bottom: 1px solid {t['border']}; }}
+
+QLineEdit, QComboBox {{ background: {t['elevated']}; border: 1px solid {t['border']};
+    border-radius: 11px; padding: 11px 14px; color: {t['text']}; }}
+QSpinBox {{ background: {t['elevated']}; border: 1px solid {t['border']};
+    border-radius: 11px; padding: 9px 12px; color: {t['text']};
+    font-family: 'Consolas', monospace; }}
+QSpinBox:focus {{ border: 1px solid {t['accent']}; }}
+QSpinBox::up-button, QSpinBox::down-button {{ width: 16px; border: none;
+    background: {t['surface2']}; }}
+QSpinBox::up-arrow {{ image: none; width: 7px; height: 7px;
+    border-left: 4px solid transparent; border-right: 4px solid transparent;
+    border-bottom: 5px solid {t['text3']}; }}
+QSpinBox::down-arrow {{ image: none; width: 7px; height: 7px;
+    border-left: 4px solid transparent; border-right: 4px solid transparent;
+    border-top: 5px solid {t['text3']}; }}
+QLineEdit::placeholder {{ color: {t['text3']}; }}
+QLineEdit:focus, QComboBox:focus {{ border: 1px solid {t['accent']}; }}
+QComboBox::drop-down {{ border: none; width: 22px; }}
+QComboBox QAbstractItemView {{ background: {t['elevated']}; color: {t['text']};
+    selection-background-color: {t['accent_soft']}; selection-color: {t['accent']};
+    border: 1px solid {t['border']}; }}
+
+QPushButton {{ background: {grad}; color: {ON_ACCENT}; border: none; border-radius: 11px;
+    padding: 11px 20px; font-weight: 700; }}
+QPushButton:hover {{ background: {t['accent']}; }}
+QPushButton#Ghost {{ background: transparent; color: {t['text2']};
+    border: 1px solid {t['border']}; }}
+QPushButton#Ghost:hover {{ border: 1px solid {t['accent']}; color: {t['accent']}; }}
+QPushButton#Danger {{ background: transparent; color: {t['text3']};
+    border: 1px solid {t['border']}; padding: 6px 14px; font-weight: 600; }}
+QPushButton#Danger:hover {{ border: 1px solid {t['danger']}; color: {t['danger']}; }}
+
+QPlainTextEdit {{ background: {t['elevated']}; border: 1px solid {t['border']}; border-radius: 11px;
+    color: {t['text2']}; font-family: 'Consolas', monospace; font-size: 12px; }}
+QCheckBox {{ color: {t['text']}; }}
+QScrollArea {{ background: transparent; border: none; }}
+QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
+QScrollBar::handle:vertical {{ background: {t['surface2']}; border-radius: 5px; min-height: 30px; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
+#StatusDot {{ font-size: 12px; color: {t['text3']}; padding: 10px 16px; }}
 """
+
+
+QSS = build_qss("dark")
 
 
 def dot_icon(color_hex: str) -> QIcon:
@@ -445,12 +540,18 @@ class MappingsPage(QWidget):
 
 
 class SettingsPage(QWidget):
-    def __init__(self, cfg, on_save):
+    def __init__(self, cfg, on_save, on_theme=None):
         super().__init__()
-        self.cfg = cfg; self.on_save = on_save
+        self.cfg = cfg; self.on_save = on_save; self.on_theme = on_theme
         lay = QVBoxLayout(self); lay.setContentsMargins(28, 24, 28, 24); lay.setSpacing(14)
         title = QLabel("Settings"); title.setObjectName("PageTitle"); lay.addWidget(title)
         form = QFormLayout(); form.setSpacing(12)
+        self.theme = QComboBox(); self.theme.addItems(["dark", "light"])
+        _th = cfg["ui"].get("theme", "dark")
+        if self.theme.findText(_th) >= 0:
+            self.theme.setCurrentText(_th)
+        self.theme.currentTextChanged.connect(self._theme_changed)
+        form.addRow("Theme", self.theme)
         self.name = QLineEdit(cfg["agent"].get("name", "laptop"))
         self.host = QLineEdit(cfg["broker"]["host"])
         self.port = QLineEdit(cfg["broker"]["port"])
@@ -497,6 +598,12 @@ class SettingsPage(QWidget):
         row = QHBoxLayout(); row.addStretch(1); row.addWidget(save); lay.addLayout(row)
         lay.addStretch(1)
 
+    def _theme_changed(self, name):
+        self.cfg["ui"]["theme"] = name
+        save_config(self.cfg)
+        if self.on_theme:
+            self.on_theme(name)
+
     def save(self):
         name = self.name.text().strip() or "laptop"
         self.cfg["agent"]["name"] = name
@@ -529,29 +636,153 @@ class ActivityPage(QWidget):
         self.log.appendPlainText(line)
 
 
+class TimerRing(QWidget):
+    """Circular countdown ring, painted to match the web .ring (track + amber arc)."""
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(96, 96)
+        self._frac = 1.0      # 0..1 remaining
+        self._text = "0:00"
+        self._ringing = False
+
+    def set_values(self, frac, text, ringing):
+        self._frac = max(0.0, min(1.0, frac)); self._text = text; self._ringing = ringing
+        self.update()
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        side = min(self.width(), self.height())
+        m = 7
+        rect = QRectF(m, m, side - 2 * m, side - 2 * m)
+        # track (faint accent ring)
+        track = QColor(TOK["accent"]); track.setAlpha(40)
+        p.setPen(QPen(track, 6)); p.drawArc(rect, 0, 360 * 16)
+        # progress arc (start at top, clockwise)
+        pen = QPen(QColor(TOK["accent"]), 6); pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        p.drawArc(rect, 90 * 16, -int(360 * self._frac * 16))
+        # center text
+        p.setPen(QColor(TOK["accent"] if self._ringing else TOK["text"]))
+        f = QFont("Consolas"); f.setPointSize(13); f.setBold(False); p.setFont(f)
+        p.drawText(self.rect(), Qt.AlignCenter, self._text)
+        p.end()
+
+
+class TimerCard(QFrame):
+    """One timer: ring + label + Cancel/Dismiss, matching the web .timer-card."""
+    def __init__(self, on_cancel):
+        super().__init__()
+        self.setObjectName("TimerCard")
+        self.setFixedWidth(168)
+        self._on_cancel = on_cancel
+        self._id = None; self._name = ""
+        v = QVBoxLayout(self); v.setContentsMargins(16, 18, 16, 14); v.setSpacing(12)
+        v.setAlignment(Qt.AlignHCenter)
+        self.ring = TimerRing(); v.addWidget(self.ring, 0, Qt.AlignHCenter)
+        self.label = QLabel("Timer"); self.label.setObjectName("TimerLabel")
+        self.label.setAlignment(Qt.AlignHCenter)
+        v.addWidget(self.label)
+        self.btn = QPushButton("Cancel"); self.btn.setObjectName("Danger")
+        self.btn.clicked.connect(self._cancel)
+        v.addWidget(self.btn)
+
+    def _cancel(self):
+        self._on_cancel(self._id, self._name)
+
+    def set_timer(self, t):
+        self._id = t["id"]; self._name = t.get("name") or ""
+        ringing = t.get("status") == "ringing"
+        self.label.setText(t.get("name") or t.get("duration_text") or "Timer")
+        self.btn.setText("Dismiss" if ringing else "Cancel")
+        self.setProperty("ringing", "true" if ringing else "false")
+        self.style().unpolish(self); self.style().polish(self)
+
+    def tick(self, remaining, total, ringing):
+        if ringing:
+            self.ring.set_values(1.0, "\u2713", True)
+        else:
+            frac = (remaining / total) if total else 0
+            self.ring.set_values(frac, TimersPage._fmt(remaining), False)
+
+
 class TimersPage(QWidget):
-    """Live view of active timers, fed by the retained skill/timer/state topic.
+    """Active timers + a New Timer form, fed by the retained skill/timer/state topic.
 
     Countdown ticks locally off a monotonic clock so it stays smooth between
     state messages and is immune to clock/timezone skew vs. the server.
     """
-    def __init__(self):
+    def __init__(self, on_create, on_cancel):
         super().__init__()
-        lay = QVBoxLayout(self); lay.setContentsMargins(28, 24, 28, 24); lay.setSpacing(14)
-        title = QLabel("Timers"); title.setObjectName("PageTitle"); lay.addWidget(title)
+        self.on_create = on_create
+        self.on_cancel = on_cancel
+        self._pending_cancel = set()
+        self._timers = []     # {id,name,duration_text,status,base_remaining,total,base_mono}
+        self._cards = []
+
+        outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); outer.addWidget(scroll)
+        page = QWidget(); scroll.setWidget(page)
+        lay = QVBoxLayout(page); lay.setContentsMargins(40, 30, 40, 40); lay.setSpacing(18)
+
+        eyebrow = QLabel("// time"); eyebrow.setObjectName("Eyebrow")
+        title = QLabel("Timers"); title.setObjectName("PageTitle")
+        lay.addWidget(eyebrow); lay.addWidget(title)
+
+        # New Timer card
+        new_card = QFrame(); new_card.setObjectName("Card")
+        nv = QVBoxLayout(new_card); nv.setContentsMargins(26, 22, 26, 24); nv.setSpacing(16)
+        nt = QLabel("NEW TIMER"); nt.setObjectName("CardTitle"); nv.addWidget(nt)
+        form = QHBoxLayout(); form.setSpacing(12)
+        self.name_in = QLineEdit(); self.name_in.setPlaceholderText("Label (optional)")
+        self.mins_in = QSpinBox(); self.mins_in.setRange(1, 600); self.mins_in.setValue(5)
+        self.mins_in.setSuffix(" min"); self.mins_in.setFixedWidth(110)
+        start = QPushButton("Start"); start.clicked.connect(self._create)
+        form.addWidget(self.name_in, 1); form.addWidget(self.mins_in); form.addWidget(start)
+        nv.addLayout(form)
+        lay.addWidget(new_card)
+
+        # Active timers card
+        act_card = QFrame(); act_card.setObjectName("Card")
+        av = QVBoxLayout(act_card); av.setContentsMargins(26, 22, 26, 24); av.setSpacing(16)
+        at = QLabel("ACTIVE TIMERS"); at.setObjectName("CardTitle"); av.addWidget(at)
         self.empty = QLabel("No active timers"); self.empty.setObjectName("Muted")
-        lay.addWidget(self.empty)
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Name", "Remaining", "Status"])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.setSelectionMode(QAbstractItemView.NoSelection)
-        self.table.setFocusPolicy(Qt.NoFocus)
-        lay.addWidget(self.table, 1)
-        self._timers = []  # {name, status, base_remaining, base_mono}
+        self.empty.setAlignment(Qt.AlignCenter)
+        av.addWidget(self.empty)
+        self.grid_host = QWidget(); self.grid = QGridLayout(self.grid_host)
+        self.grid.setContentsMargins(0, 0, 0, 0); self.grid.setSpacing(14)
+        self.grid.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        av.addWidget(self.grid_host)
+        lay.addWidget(act_card)
+        lay.addStretch(1)
+
         self._tick = QTimer(self); self._tick.setInterval(1000)
-        self._tick.timeout.connect(self._render); self._tick.start()
+        self._tick.timeout.connect(self._render_tick); self._tick.start()
+
+    def _create(self):
+        name = self.name_in.text().strip()
+        mins = self.mins_in.value()
+        text = (f"set a {name} timer for {mins} minutes" if name
+                else f"set a timer for {mins} minutes")
+        self.on_create(text)
+        self.name_in.clear(); self.mins_in.setValue(5)
+
+    def _cancel(self, timer_id, name):
+        if timer_id:
+            self._pending_cancel.add(timer_id)
+        data = {}
+        if timer_id:
+            data["timer_id"] = timer_id
+        if name:
+            data["timer_name"] = name
+        self.on_cancel(data)
+        self._rebuild_cards()
+
+    @staticmethod
+    def _fmt(secs):
+        secs = max(0, int(round(secs)))
+        h, rem = divmod(secs, 3600); m, s = divmod(rem, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
     @Slot(str)
     def update_state(self, payload):
@@ -560,34 +791,49 @@ class TimersPage(QWidget):
         except Exception:
             data = {}
         now = time.monotonic()
+        incoming = data.get("timers") or []
+        ids = {t.get("id") for t in incoming}
+        # drop pending-cancels the server has confirmed gone
+        self._pending_cancel = {i for i in self._pending_cancel if i in ids}
         self._timers = [{
-            "name": t.get("name") or t.get("duration_text") or "Timer",
+            "id": t.get("id"),
+            "name": t.get("name"),
+            "duration_text": t.get("duration_text"),
             "status": t.get("status") or "scheduled",
             "base_remaining": int(t.get("remaining_seconds") or 0),
+            "total": int(t.get("total_seconds") or t.get("remaining_seconds") or 1) or 1,
             "base_mono": now,
-        } for t in (data.get("timers") or [])]
-        self._render()
+        } for t in incoming]
+        self._rebuild_cards()
 
-    @staticmethod
-    def _fmt(secs):
-        secs = max(0, int(round(secs)))
-        h, rem = divmod(secs, 3600); m, s = divmod(rem, 60)
-        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+    def _visible(self):
+        return [t for t in self._timers if t["id"] not in self._pending_cancel]
 
-    def _render(self):
+    def _rebuild_cards(self):
+        vis = self._visible()
+        self.empty.setVisible(not vis)
+        self.grid_host.setVisible(bool(vis))
+        # clear grid
+        for c in self._cards:
+            c.setParent(None); c.deleteLater()
+        self._cards = []
+        cols = max(1, (self.width() - 130) // 182) or 1
+        for i, t in enumerate(vis):
+            card = TimerCard(self._cancel)
+            card.set_timer(t)
+            self.grid.addWidget(card, i // cols, i % cols)
+            self._cards.append(card)
+        self._render_tick()
+
+    def _render_tick(self):
         now = time.monotonic()
-        rows = self._timers
-        self.empty.setVisible(not rows)
-        self.table.setVisible(bool(rows))
-        self.table.setRowCount(len(rows))
-        for i, t in enumerate(rows):
+        vis = self._visible()
+        for card, t in zip(self._cards, vis):
             if t["status"] == "ringing":
-                remaining = "ringing"
+                card.tick(0, t["total"], True)
             else:
-                remaining = self._fmt(t["base_remaining"] - (now - t["base_mono"]))
-            self.table.setItem(i, 0, QTableWidgetItem(t["name"]))
-            self.table.setItem(i, 1, QTableWidgetItem(remaining))
-            self.table.setItem(i, 2, QTableWidgetItem(t["status"]))
+                remaining = t["base_remaining"] - (now - t["base_mono"])
+                card.tick(max(0, remaining), t["total"], False)
 
 
 class MainWindow(QMainWindow):
@@ -608,9 +854,16 @@ class MainWindow(QMainWindow):
         h = QHBoxLayout(central); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(0)
 
         # sidebar
-        side = QWidget(); side.setObjectName("Sidebar"); side.setFixedWidth(200)
-        sv = QVBoxLayout(side); sv.setContentsMargins(0, 0, 0, 0); sv.setSpacing(0)
-        brand = QLabel("JAY"); brand.setObjectName("Brand"); sv.addWidget(brand)
+        side = QWidget(); side.setObjectName("Sidebar"); side.setFixedWidth(232)
+        sv = QVBoxLayout(side); sv.setContentsMargins(0, 18, 0, 0); sv.setSpacing(0)
+        brand_row = QHBoxLayout(); brand_row.setContentsMargins(20, 6, 20, 22); brand_row.setSpacing(12)
+        logo = QLabel("J"); logo.setObjectName("Logo")
+        bt = QVBoxLayout(); bt.setSpacing(0)
+        bn = QLabel("JAY"); bn.setObjectName("Brand")
+        bs = QLabel("VOICE OS"); bs.setObjectName("BrandSub")
+        bt.addWidget(bn); bt.addWidget(bs)
+        brand_row.addWidget(logo); brand_row.addLayout(bt); brand_row.addStretch(1)
+        sv.addLayout(brand_row)
         self.nav = QListWidget()
         for name in ["Mappings", "Timers", "Settings", "Activity"]:
             QListWidgetItem(name, self.nav)
@@ -623,8 +876,11 @@ class MainWindow(QMainWindow):
         # pages
         self.stack = QStackedWidget()
         self.mappings_page = MappingsPage(self.get_mappings, self.set_mappings)
-        self.timers_page = TimersPage()
-        self.settings_page = SettingsPage(self.cfg, self.apply_settings)
+        self.timers_page = TimersPage(
+            on_create=self.agent.publish_stt,
+            on_cancel=lambda data: self.agent.publish_skill("timer", "cancel_timer", data),
+        )
+        self.settings_page = SettingsPage(self.cfg, self.apply_settings, self.apply_theme)
         self.activity_page = ActivityPage()
         self.stack.addWidget(self.mappings_page)
         self.stack.addWidget(self.timers_page)
@@ -715,17 +971,20 @@ class MainWindow(QMainWindow):
         self.ww_ctl.start()
 
     def closeEvent(self, event):
-        if self.ptt_ctl is not None:
-            try:
-                self.ptt_ctl.stop()
-            except Exception:
-                pass
-        if self.ww_ctl is not None:
-            try:
-                self.ww_ctl.stop()
-            except Exception:
-                pass
+        for ctl in (self.ptt_ctl, self.ww_ctl):
+            if ctl is not None:
+                try:
+                    ctl.stop()
+                except Exception:
+                    pass
+        try:
+            self.agent.stop()
+        except Exception:
+            pass
         super().closeEvent(event)
+
+    def apply_theme(self, name):
+        QApplication.instance().setStyleSheet(build_qss(name))
 
     @Slot(bool, str)
     def on_status(self, connected, detail):
@@ -782,10 +1041,6 @@ class MainWindow(QMainWindow):
                 self.bridge.activity.emit(f"Update failed: {exc}")
         threading.Thread(target=work, daemon=True).start()
 
-    def closeEvent(self, event):
-        self.agent.stop()
-        super().closeEvent(event)
-
 
 def main():
     acquire_mutex()
@@ -793,6 +1048,7 @@ def main():
     app.setApplicationName(APP_NAME)
     app.setStyleSheet(QSS)
     win = MainWindow()
+    win.apply_theme(win.cfg["ui"].get("theme", "dark"))
     win.show()
     sys.exit(app.exec())
 
