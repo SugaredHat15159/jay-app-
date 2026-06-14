@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 from PyInstaller.utils.hooks import collect_dynamic_libs, collect_data_files
 block_cipher = None
 
@@ -7,16 +8,20 @@ block_cipher = None
 sd_bins = collect_dynamic_libs('sounddevice')
 sd_data = collect_data_files('sounddevice')
 
-# openWakeWord ships ONNX feature models + wake models under resources/models;
-# onnxruntime ships native DLLs. Bundle both so wake word works fully offline.
+# openWakeWord ships ONNX feature models under resources/models; onnxruntime
+# ships native DLLs. The wake models themselves are fetched by CI into ./ww_models
+# (download_models lands them in a user cache that collect_data_files can't see).
 oww_data = collect_data_files('openwakeword')
 ort_bins = collect_dynamic_libs('onnxruntime')
+ww_models = [(os.path.join('ww_models', f), 'ww_models')
+             for f in (os.listdir('ww_models') if os.path.isdir('ww_models') else [])
+             if f.endswith('.onnx')]
 
 a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=sd_bins + ort_bins,
-    datas=sd_data + oww_data,
+    datas=sd_data + oww_data + ww_models,
     hiddenimports=[
         'paho.mqtt.client',
         'pynput.keyboard._win32',
