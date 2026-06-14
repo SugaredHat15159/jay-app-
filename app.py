@@ -18,12 +18,13 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
 
 import paho.mqtt.client as mqtt
 
-from PySide6.QtCore import Qt, QObject, Signal, Slot
+from PySide6.QtCore import Qt, QObject, Signal, Slot, QTimer
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QListWidget,
@@ -216,6 +217,10 @@ class Bridge(QObject):
     status = Signal(bool, str)     # connected?, detail
     activity = Signal(str)         # log line for the activity pane
     update_result = Signal(bool, bool, str, str)  # manual?, available?, tag, asset_url
+    skill_state = Signal(str, str)  # skill name, retained-state JSON payload
+
+
+STATE_TOPICS = ("timer",)  # retained skill/<x>/state topics the dashboards render
 
 
 class AgentMQTT:
@@ -253,6 +258,8 @@ class AgentMQTT:
         if rc == 0:
             client.subscribe("pc/command", qos=1)               # shared / broadcast
             client.subscribe(f"pc/command/{self.name}", qos=1)  # this machine only
+            for _skill in STATE_TOPICS:
+                client.subscribe(f"skill/{_skill}/state", qos=1)  # retained dashboards
             self.bridge.status.emit(True, f"{self.host}:{self.port}")
             self.bridge.activity.emit(f"Connected as '{self.name}' -> pc/command/{self.name}")
             self._publish_status("online")
@@ -264,9 +271,17 @@ class AgentMQTT:
         self.bridge.status.emit(False, "disconnected — reconnecting")
 
     def _on_message(self, client, userdata, msg):
+        topic = msg.topic
+        # Retained dashboard state updates the UI regardless of the command toggle.
+        if topic.startswith("skill/") and topic.endswith("/state"):
+            try:
+                self.bridge.skill_state.emit(topic.split("/")[1], msg.payload.decode() or "{}")
+            except Exception:
+                pass
+            return
         if not self.enabled:
             return
-        if msg.topic not in ("pc/command", f"pc/command/{self.name}"):
+        if topic not in ("pc/command", f"pc/command/{self.name}"):
             return
         try:
             payload = json.loads(msg.payload.decode())
@@ -327,6 +342,7 @@ QMainWindow, QWidget { background: #14110d; color: #f2ebdc;
 #Sidebar QListWidget::item:hover { background: #221c15; }
 #Brand { color: #e8a04c; font-size: 20px; font-weight: 700; padding: 18px 18px 8px; }
 #PageTitle { font-size: 22px; font-weight: 700; }
+#Muted { color: #8a8070; }
 QTableWidget { background: #1a1610; border: 1px solid #2a2319; border-radius: 8px;
     gridline-color: #2a2319; selection-background-color: #2a2319; }
 QHeaderView::section { background: #221c15; color: #b3a892; padding: 8px;
@@ -513,6 +529,67 @@ class ActivityPage(QWidget):
         self.log.appendPlainText(line)
 
 
+class TimersPage(QWidget):
+    """Live view of active timers, fed by the retained skill/timer/state topic.
+
+    Countdown ticks locally off a monotonic clock so it stays smooth between
+    state messages and is immune to clock/timezone skew vs. the server.
+    """
+    def __init__(self):
+        super().__init__()
+        lay = QVBoxLayout(self); lay.setContentsMargins(28, 24, 28, 24); lay.setSpacing(14)
+        title = QLabel("Timers"); title.setObjectName("PageTitle"); lay.addWidget(title)
+        self.empty = QLabel("No active timers"); self.empty.setObjectName("Muted")
+        lay.addWidget(self.empty)
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Name", "Remaining", "Status"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.setFocusPolicy(Qt.NoFocus)
+        lay.addWidget(self.table, 1)
+        self._timers = []  # {name, status, base_remaining, base_mono}
+        self._tick = QTimer(self); self._tick.setInterval(1000)
+        self._tick.timeout.connect(self._render); self._tick.start()
+
+    @Slot(str)
+    def update_state(self, payload):
+        try:
+            data = json.loads(payload or "{}")
+        except Exception:
+            data = {}
+        now = time.monotonic()
+        self._timers = [{
+            "name": t.get("name") or t.get("duration_text") or "Timer",
+            "status": t.get("status") or "scheduled",
+            "base_remaining": int(t.get("remaining_seconds") or 0),
+            "base_mono": now,
+        } for t in (data.get("timers") or [])]
+        self._render()
+
+    @staticmethod
+    def _fmt(secs):
+        secs = max(0, int(round(secs)))
+        h, rem = divmod(secs, 3600); m, s = divmod(rem, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+    def _render(self):
+        now = time.monotonic()
+        rows = self._timers
+        self.empty.setVisible(not rows)
+        self.table.setVisible(bool(rows))
+        self.table.setRowCount(len(rows))
+        for i, t in enumerate(rows):
+            if t["status"] == "ringing":
+                remaining = "ringing"
+            else:
+                remaining = self._fmt(t["base_remaining"] - (now - t["base_mono"]))
+            self.table.setItem(i, 0, QTableWidgetItem(t["name"]))
+            self.table.setItem(i, 1, QTableWidgetItem(remaining))
+            self.table.setItem(i, 2, QTableWidgetItem(t["status"]))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -535,7 +612,7 @@ class MainWindow(QMainWindow):
         sv = QVBoxLayout(side); sv.setContentsMargins(0, 0, 0, 0); sv.setSpacing(0)
         brand = QLabel("JAY"); brand.setObjectName("Brand"); sv.addWidget(brand)
         self.nav = QListWidget()
-        for name in ["Mappings", "Settings", "Activity"]:
+        for name in ["Mappings", "Timers", "Settings", "Activity"]:
             QListWidgetItem(name, self.nav)
         self.nav.setCurrentRow(0)
         sv.addWidget(self.nav, 1)
@@ -546,9 +623,11 @@ class MainWindow(QMainWindow):
         # pages
         self.stack = QStackedWidget()
         self.mappings_page = MappingsPage(self.get_mappings, self.set_mappings)
+        self.timers_page = TimersPage()
         self.settings_page = SettingsPage(self.cfg, self.apply_settings)
         self.activity_page = ActivityPage()
         self.stack.addWidget(self.mappings_page)
+        self.stack.addWidget(self.timers_page)
         self.stack.addWidget(self.settings_page)
         self.stack.addWidget(self.activity_page)
         h.addWidget(self.stack, 1)
@@ -557,6 +636,7 @@ class MainWindow(QMainWindow):
         self.bridge.status.connect(self.on_status)
         self.bridge.activity.connect(self.activity_page.append)
         self.bridge.update_result.connect(self.on_update_result)
+        self.bridge.skill_state.connect(self._on_skill_state)
         self.settings_page.upd_btn.clicked.connect(lambda: self.check_updates(manual=True))
 
         self.agent.start()
@@ -652,6 +732,12 @@ class MainWindow(QMainWindow):
         color = "#8fb96b" if connected else "#e07a5f"
         word = "connected" if connected else "offline"
         self.status_lbl.setText(f"<span style='color:{color}'>●</span> {word} — {detail}")
+
+    @Slot(str, str)
+    def _on_skill_state(self, skill, payload):
+        """Route a retained skill/<x>/state message to its dashboard page."""
+        if skill == "timer":
+            self.timers_page.update_state(payload)
 
 
     def check_updates(self, manual=False):
