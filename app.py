@@ -426,8 +426,10 @@ QTableWidget {{ background: {t['elevated']}; border: 1px solid {t['border']}; bo
 QHeaderView::section {{ background: {t['surface2']}; color: {t['text2']}; padding: 8px;
     border: none; border-bottom: 1px solid {t['border']}; }}
 
-QLineEdit, QComboBox {{ background: {t['elevated']}; border: 1px solid {t['border']};
+QLineEdit {{ background: {t['elevated']}; border: 1px solid {t['border']};
     border-radius: 11px; padding: 11px 14px; color: {t['text']}; }}
+QComboBox {{ background: {t['elevated']}; border: 1px solid {t['border']};
+    border-radius: 9px; padding: 5px 10px; color: {t['text']}; min-height: 22px; }}
 QSpinBox {{ background: {t['elevated']}; border: 1px solid {t['border']};
     border-radius: 11px; padding: 9px 12px; color: {t['text']};
     font-family: 'Consolas', monospace; }}
@@ -442,7 +444,10 @@ QSpinBox::down-arrow {{ image: none; width: 7px; height: 7px;
     border-top: 5px solid {t['text3']}; }}
 QLineEdit::placeholder {{ color: {t['text3']}; }}
 QLineEdit:focus, QComboBox:focus {{ border: 1px solid {t['accent']}; }}
-QComboBox::drop-down {{ border: none; width: 22px; }}
+QComboBox::drop-down {{ border: none; width: 20px; }}
+QComboBox::down-arrow {{ width: 8px; height: 8px;
+    border-left: 4px solid transparent; border-right: 4px solid transparent;
+    border-top: 5px solid {t['text2']}; margin-right: 7px; }}
 QComboBox QAbstractItemView {{ background: {t['elevated']}; color: {t['text']};
     selection-background-color: {t['accent_soft']}; selection-color: {t['accent']};
     border: 1px solid {t['border']}; }}
@@ -505,9 +510,11 @@ class MappingsPage(QWidget):
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Phrase", "Type", "Value"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
+        self.table.setColumnWidth(1, 140)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(48)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         lay.addWidget(self.table)
 
@@ -522,7 +529,15 @@ class MappingsPage(QWidget):
     def _type_combo(self, current="url"):
         c = QComboBox(); c.addItems(["url", "app", "script"])
         c.setCurrentText(current if current in ("url", "app", "script") else "url")
-        return c
+        c.setFixedHeight(34); c.setMinimumWidth(112)
+        wrap = QWidget(); wl = QHBoxLayout(wrap)
+        wl.setContentsMargins(8, 0, 8, 0); wl.addWidget(c)
+        wrap._combo = c
+        return wrap
+
+    def _row_combo(self, r):
+        w = self.table.cellWidget(r, 1)
+        return getattr(w, "_combo", w) if w else None
 
     def reload(self):
         rows = self.get_mappings()
@@ -548,7 +563,7 @@ class MappingsPage(QWidget):
         out = []
         for r in range(self.table.rowCount()):
             phrase = (self.table.item(r, 0).text() if self.table.item(r, 0) else "").strip()
-            combo = self.table.cellWidget(r, 1)
+            combo = self._row_combo(r)
             kind = combo.currentText() if combo else "url"
             value = (self.table.item(r, 2).text() if self.table.item(r, 2) else "").strip()
             if phrase and value:
