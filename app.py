@@ -1122,10 +1122,21 @@ class MainWindow(QMainWindow):
 
 def main():
     acquire_mutex()
-    # WebEngine in a frozen build needs GL context sharing set before the app is
-    # created, and the Chromium sandbox disabled (it can't initialise inside the
-    # PyInstaller bundle on Windows).
-    os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox")
+    # WebEngine must be configured before QApplication. The dashboard is served
+    # over http on a Tailscale IP, so getUserMedia (the in-page mic) would be
+    # blocked as an insecure origin — tell Chromium to treat it as secure.
+    from urllib.parse import urlsplit
+    try:
+        _cfg = load_config()
+        web_url = (_cfg["web"].get("url", "") or "http://127.0.0.1:8080/").strip()
+    except Exception:
+        web_url = "http://127.0.0.1:8080/"
+    parts = urlsplit(web_url)
+    flags = ["--no-sandbox"]
+    if parts.scheme == "http" and parts.hostname not in ("localhost", "127.0.0.1"):
+        origin = f"http://{parts.hostname}" + (f":{parts.port}" if parts.port else "")
+        flags.append(f"--unsafely-treat-insecure-origin-as-secure={origin}")
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags)
     try:
         QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
     except Exception:
