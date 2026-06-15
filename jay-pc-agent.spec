@@ -17,6 +17,9 @@ ww_models = [(os.path.join('ww_models', f), 'ww_models')
              for f in (os.listdir('ww_models') if os.path.isdir('ww_models') else [])
              if f.endswith('.onnx')]
 
+# Qt WebEngine (Chromium) needs its process exe, .pak resources, icudtl.dat and
+# locales bundled. PyInstaller's PySide6 hook collects these when the WebEngine
+# modules are imported; the hiddenimports below make that explicit.
 a = Analysis(
     ['app.py'],
     pathex=[],
@@ -32,6 +35,15 @@ a = Analysis(
         'openwakeword',
         'openwakeword.model',
         'onnxruntime',
+        'PySide6.QtWebEngineWidgets',
+        'PySide6.QtWebEngineCore',
+        'PySide6.QtWebChannel',
+        'PySide6.QtNetwork',
+        'PySide6.QtPrintSupport',
+        'PySide6.QtQuick',
+        'PySide6.QtQml',
+        'PySide6.QtOpenGL',
+        'PySide6.QtPositioning',
     ],
     hookspath=[],
     runtime_hooks=[],

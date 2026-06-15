@@ -24,15 +24,24 @@ from pathlib import Path
 
 import paho.mqtt.client as mqtt
 
-from PySide6.QtCore import Qt, QObject, Signal, Slot, QTimer, QRectF
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QPen
+from PySide6.QtCore import Qt, QObject, Signal, Slot, QTimer, QRectF, QUrl
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QPen, QAction
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QListWidget,
     QListWidgetItem, QStackedWidget, QLabel, QTableWidget, QTableWidgetItem,
     QPushButton, QComboBox, QLineEdit, QHeaderView, QFormLayout, QPlainTextEdit,
     QMessageBox, QAbstractItemView, QCheckBox, QFrame, QGridLayout, QScrollArea,
-    QSpinBox, QSizePolicy,
+    QSpinBox, QSizePolicy, QToolBar, QDialog,
 )
+
+try:
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+    from PySide6.QtWebEngineCore import QWebEnginePage
+    HAVE_WEBENGINE = True
+except Exception:
+    QWebEngineView = None
+    QWebEnginePage = None
+    HAVE_WEBENGINE = False
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("jay-pc-agent")
@@ -119,6 +128,12 @@ def load_config() -> configparser.ConfigParser:
         cfg["ui"] = {"theme": "dark"}
     if "theme" not in cfg["ui"]:
         cfg["ui"]["theme"] = "dark"
+    if "web" not in cfg:
+        host = cfg["broker"].get("host", "100.119.255.57")
+        cfg["web"] = {"url": f"http://{host}:8080/"}
+    if "url" not in cfg["web"]:
+        host = cfg["broker"].get("host", "100.119.255.57")
+        cfg["web"]["url"] = f"http://{host}:8080/"
     return cfg
 
 
@@ -450,6 +465,14 @@ QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
 QScrollBar::handle:vertical {{ background: {t['surface2']}; border-radius: 5px; min-height: 30px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
 #StatusDot {{ font-size: 12px; color: {t['text3']}; padding: 10px 16px; }}
+QToolBar#TopBar {{ background: {t['bg2']}; border: none; border-bottom: 1px solid {t['border']};
+    padding: 6px 10px; spacing: 4px; }}
+QToolBar#TopBar QToolButton {{ background: transparent; color: {t['text2']};
+    border: none; border-radius: 8px; padding: 7px 13px; font-weight: 600; }}
+QToolBar#TopBar QToolButton:hover {{ background: {t['hover']}; color: {t['text']}; }}
+QToolBar#TopBar::separator {{ background: {t['border']}; width: 1px; margin: 6px 6px; }}
+QDialog {{ background: {t['bg']}; }}
+#WebFallback {{ color: {t['text2']}; font-size: 15px; }}
 """
 
 
@@ -572,6 +595,7 @@ class SettingsPage(QWidget):
         self.ptt_enabled.setChecked(agent.get("ptt_enabled", "false").lower() == "true")
         self.hotkey = QLineEdit(agent.get("hotkey", "ctrl+alt+j"))
         self.stt_url = QLineEdit(cfg["stt"].get("url", "http://100.119.255.57:8080/api/stt"))
+        self.web_url = QLineEdit(cfg["web"].get("url", "http://100.119.255.57:8080/"))
         self.ww_enabled = QCheckBox("Enable wake word (always-on listening)")
         self.ww_enabled.setChecked(agent.get("ww_enabled", "false").lower() == "true")
         self.ww_word = QComboBox()
@@ -584,6 +608,7 @@ class SettingsPage(QWidget):
         form.addRow("Wake word", self.ww_enabled)
         form.addRow("Wake phrase", self.ww_word)
         form.addRow("STT server URL", self.stt_url)
+        form.addRow("Dashboard URL", self.web_url)
         lay.addLayout(form)
         ver = QHBoxLayout()
         ver.addWidget(QLabel(f"Version {__version__}"))
@@ -619,6 +644,9 @@ class SettingsPage(QWidget):
         if "stt" not in self.cfg:
             self.cfg["stt"] = {}
         self.cfg["stt"]["url"] = self.stt_url.text().strip() or "http://100.119.255.57:8080/api/stt"
+        if "web" not in self.cfg:
+            self.cfg["web"] = {}
+        self.cfg["web"]["url"] = self.web_url.text().strip() or "http://100.119.255.57:8080/"
         save_config(self.cfg)
         self.on_save(self.cfg)
         QMessageBox.information(self, "Saved", "Settings saved \u2014 reconnecting to the broker.")
@@ -840,7 +868,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.resize(820, 560)
+        self.resize(1180, 780)
         self.cfg = load_config()
         self._mappings = load_mappings()
         self._lock = threading.Lock()
@@ -850,55 +878,95 @@ class MainWindow(QMainWindow):
         self.ptt_ctl = None
         self.ww_ctl = None
 
-        central = QWidget(); self.setCentralWidget(central)
-        h = QHBoxLayout(central); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(0)
+        # toolbar holds the app-only actions; the website fills the rest of the window
+        tb = QToolBar(); tb.setObjectName("TopBar"); tb.setMovable(False)
+        self.addToolBar(tb)
+        a_reload = QAction("\u21bb  Reload", self); a_reload.triggered.connect(self._reload_web)
+        a_map = QAction("Mappings", self); a_map.triggered.connect(self.open_mappings)
+        a_set = QAction("Settings", self); a_set.triggered.connect(self.open_settings)
+        a_act = QAction("Activity", self); a_act.triggered.connect(self.open_activity)
+        tb.addAction(a_reload); tb.addSeparator()
+        tb.addAction(a_map); tb.addAction(a_set); tb.addAction(a_act)
+        spacer = QWidget(); spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(spacer)
+        self.status_lbl = QLabel("\u25cf connecting"); self.status_lbl.setObjectName("StatusDot")
+        tb.addWidget(self.status_lbl)
 
-        # sidebar
-        side = QWidget(); side.setObjectName("Sidebar"); side.setFixedWidth(232)
-        sv = QVBoxLayout(side); sv.setContentsMargins(0, 18, 0, 0); sv.setSpacing(0)
-        brand_row = QHBoxLayout(); brand_row.setContentsMargins(20, 6, 20, 22); brand_row.setSpacing(12)
-        logo = QLabel("J"); logo.setObjectName("Logo")
-        bt = QVBoxLayout(); bt.setSpacing(0)
-        bn = QLabel("JAY"); bn.setObjectName("Brand")
-        bs = QLabel("VOICE OS"); bs.setObjectName("BrandSub")
-        bt.addWidget(bn); bt.addWidget(bs)
-        brand_row.addWidget(logo); brand_row.addLayout(bt); brand_row.addStretch(1)
-        sv.addLayout(brand_row)
-        self.nav = QListWidget()
-        for name in ["Mappings", "Timers", "Settings", "Activity"]:
-            QListWidgetItem(name, self.nav)
-        self.nav.setCurrentRow(0)
-        sv.addWidget(self.nav, 1)
-        self.status_lbl = QLabel("● connecting"); self.status_lbl.setObjectName("StatusDot")
-        sv.addWidget(self.status_lbl)
-        h.addWidget(side)
+        self._log = []
+        self._activity_view = None
 
-        # pages
-        self.stack = QStackedWidget()
-        self.mappings_page = MappingsPage(self.get_mappings, self.set_mappings)
-        self.timers_page = TimersPage(
-            on_create=self.agent.publish_stt,
-            on_cancel=lambda data: self.agent.publish_skill("timer", "cancel_timer", data),
-        )
-        self.settings_page = SettingsPage(self.cfg, self.apply_settings, self.apply_theme)
-        self.activity_page = ActivityPage()
-        self.stack.addWidget(self.mappings_page)
-        self.stack.addWidget(self.timers_page)
-        self.stack.addWidget(self.settings_page)
-        self.stack.addWidget(self.activity_page)
-        h.addWidget(self.stack, 1)
+        # main content = the live JAY dashboard (exact website, all features)
+        if HAVE_WEBENGINE:
+            self.web = QWebEngineView()
+            try:
+                self.web.page().featurePermissionRequested.connect(self._on_feature_permission)
+            except Exception:
+                pass
+            self.setCentralWidget(self.web)
+            self._reload_web()
+        else:
+            self.web = None
+            fb = QLabel("Web view unavailable in this build.\nReinstall/update the app to load the dashboard.")
+            fb.setObjectName("WebFallback"); fb.setAlignment(Qt.AlignCenter)
+            self.setCentralWidget(fb)
 
-        self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.bridge.status.connect(self.on_status)
-        self.bridge.activity.connect(self.activity_page.append)
+        self.bridge.activity.connect(self._on_activity)
         self.bridge.update_result.connect(self.on_update_result)
-        self.bridge.skill_state.connect(self._on_skill_state)
-        self.settings_page.upd_btn.clicked.connect(lambda: self.check_updates(manual=True))
 
         self.agent.start()
         self.check_updates(manual=False)  # silent check on launch
         self._reconcile_ptt()
         self._reconcile_ww()
+
+    # ── web view ──
+    def _web_url(self):
+        url = (self.cfg["web"].get("url", "") or "").strip()
+        if not url:
+            url = f"http://{self.cfg['broker'].get('host', '127.0.0.1')}:8080/"
+        return url
+
+    def _reload_web(self):
+        if self.web is not None:
+            self.web.setUrl(QUrl(self._web_url()))
+
+    def _on_feature_permission(self, origin, feature):
+        # auto-grant the dashboard's mic so the in-page voice button works
+        try:
+            self.web.page().setFeaturePermission(
+                origin, feature, QWebEnginePage.PermissionPolicy.PermissionGrantedByUser)
+        except Exception:
+            pass
+
+    # ── native dialogs for app-only config ──
+    def _show_dialog(self, title, widget, w=780, h=580):
+        dlg = QDialog(self); dlg.setWindowTitle(f"{APP_NAME} — {title}"); dlg.resize(w, h)
+        lay = QVBoxLayout(dlg); lay.setContentsMargins(0, 0, 0, 0); lay.addWidget(widget)
+        dlg.exec()
+
+    def open_mappings(self):
+        page = MappingsPage(self.get_mappings, self.set_mappings)
+        self._show_dialog("Mappings", page)
+
+    def open_settings(self):
+        page = SettingsPage(self.cfg, self.apply_settings, self.apply_theme)
+        page.upd_btn.clicked.connect(lambda: self.check_updates(manual=True))
+        self._show_dialog("Settings", page)
+
+    def open_activity(self):
+        view = QPlainTextEdit(); view.setReadOnly(True)
+        view.setPlainText("\n".join(self._log))
+        self._activity_view = view
+        self._show_dialog("Activity", view, w=720, h=460)
+        self._activity_view = None
+
+    @Slot(str)
+    def _on_activity(self, line):
+        self._log.append(line)
+        if len(self._log) > 800:
+            self._log = self._log[-800:]
+        if self._activity_view is not None:
+            self._activity_view.appendPlainText(line)
 
     # mappings shared between GUI and mqtt thread
     def get_mappings(self):
@@ -913,6 +981,7 @@ class MainWindow(QMainWindow):
         self.agent.apply_config(cfg)
         self._reconcile_ptt()
         self._reconcile_ww()
+        self._reload_web()
 
     # ── push-to-talk ──
     def _on_ptt_status(self, msg):
@@ -992,12 +1061,6 @@ class MainWindow(QMainWindow):
         word = "connected" if connected else "offline"
         self.status_lbl.setText(f"<span style='color:{color}'>●</span> {word} — {detail}")
 
-    @Slot(str, str)
-    def _on_skill_state(self, skill, payload):
-        """Route a retained skill/<x>/state message to its dashboard page."""
-        if skill == "timer":
-            self.timers_page.update_state(payload)
-
 
     def check_updates(self, manual=False):
         if updater is None:
@@ -1030,7 +1093,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Up to date", f"You're on the latest version ({__version__}).")
 
     def _download_and_run(self, asset_url):
-        self.activity_page.append("Downloading update...")
+        self.bridge.activity.emit("Downloading update...")
         def work():
             try:
                 path = updater.download_installer(asset_url)
@@ -1044,6 +1107,14 @@ class MainWindow(QMainWindow):
 
 def main():
     acquire_mutex()
+    # WebEngine in a frozen build needs GL context sharing set before the app is
+    # created, and the Chromium sandbox disabled (it can't initialise inside the
+    # PyInstaller bundle on Windows).
+    os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox")
+    try:
+        QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
+    except Exception:
+        pass
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setStyleSheet(QSS)
