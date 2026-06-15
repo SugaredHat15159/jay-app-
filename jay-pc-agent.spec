@@ -8,14 +8,21 @@ block_cipher = None
 sd_bins = collect_dynamic_libs('sounddevice')
 sd_data = collect_data_files('sounddevice')
 
-# openWakeWord ships ONNX feature models under resources/models; onnxruntime
-# ships native DLLs. The wake models themselves are fetched by CI into ./ww_models
-# (download_models lands them in a user cache that collect_data_files can't see).
+# openWakeWord needs TWO kinds of ONNX models at runtime:
+#  - shared FEATURE models (melspectrogram.onnx, embedding_model.onnx) that Model()
+#    loads from openwakeword/resources/models/ by default
+#  - the WAKE models (hey_jarvis_v0.1.onnx, ...) which ww.py resolves from ww_models/
+# Newer openwakeword releases download these into a user cache instead of shipping
+# them in the wheel, so collect_data_files misses them. fetch_ww_models.py gathers
+# ALL of them into ./ww_models; here we route each kind to where it must live.
 oww_data = collect_data_files('openwakeword')
 ort_bins = collect_dynamic_libs('onnxruntime')
+_FEATURE = {'melspectrogram.onnx', 'embedding_model.onnx'}
+_have = set(os.listdir('ww_models')) if os.path.isdir('ww_models') else set()
 ww_models = [(os.path.join('ww_models', f), 'ww_models')
-             for f in (os.listdir('ww_models') if os.path.isdir('ww_models') else [])
-             if f.endswith('.onnx')]
+             for f in _have if f.endswith('.onnx') and f not in _FEATURE]
+ww_features = [(os.path.join('ww_models', f), os.path.join('openwakeword', 'resources', 'models'))
+               for f in _have if f in _FEATURE]
 
 # Qt WebEngine (Chromium) needs its process exe, .pak resources, icudtl.dat and
 # locales bundled. PyInstaller's PySide6 hook collects these when the WebEngine
@@ -24,7 +31,7 @@ a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=sd_bins + ort_bins,
-    datas=sd_data + oww_data + ww_models,
+    datas=sd_data + oww_data + ww_models + ww_features,
     hiddenimports=[
         'paho.mqtt.client',
         'pynput.keyboard._win32',

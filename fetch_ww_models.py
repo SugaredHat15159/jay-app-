@@ -38,8 +38,9 @@ for src in candidates:
 have = sorted(f for f in os.listdir("ww_models") if f.endswith(".onnx"))
 print("ww_models contains:", have)
 
-required = "hey_jarvis_v0.1.onnx"
-if required not in have:
-    print(f"ERROR: {required} not found after download", file=sys.stderr)
+required = ["hey_jarvis_v0.1.onnx", "melspectrogram.onnx", "embedding_model.onnx"]
+missing = [r for r in required if r not in have]
+if missing:
+    print(f"ERROR: missing required model(s) after download: {missing}", file=sys.stderr)
     sys.exit(1)
-print("OK: wake models bundled")
+print("OK: wake + feature models bundled")
