@@ -1002,9 +1002,16 @@ class MainWindow(QMainWindow):
             pass
 
     # ── native dialogs for app-only config ──
-    def _show_dialog(self, title, widget, w=780, h=580):
+    def _show_dialog(self, title, widget, w=780, h=580, scroll=False):
         dlg = QDialog(self); dlg.setWindowTitle(f"{APP_NAME} — {title}"); dlg.resize(w, h)
-        lay = QVBoxLayout(dlg); lay.setContentsMargins(0, 0, 0, 0); lay.addWidget(widget)
+        lay = QVBoxLayout(dlg); lay.setContentsMargins(0, 0, 0, 0)
+        if scroll:
+            area = QScrollArea(); area.setWidgetResizable(True)
+            area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            area.setWidget(widget)
+            lay.addWidget(area)
+        else:
+            lay.addWidget(widget)
         dlg.exec()
 
     def open_mappings(self):
@@ -1014,7 +1021,7 @@ class MainWindow(QMainWindow):
     def open_settings(self):
         page = SettingsPage(self.cfg, self.apply_settings, self.apply_theme)
         page.upd_btn.clicked.connect(lambda: self.check_updates(manual=True))
-        self._show_dialog("Settings", page)
+        self._show_dialog("Settings", page, scroll=True)
 
     def open_activity(self):
         view = QPlainTextEdit(); view.setReadOnly(True)
