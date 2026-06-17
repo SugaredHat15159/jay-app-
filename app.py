@@ -134,6 +134,8 @@ def load_config() -> configparser.ConfigParser:
     if "url" not in cfg["web"]:
         host = cfg["broker"].get("host", "100.119.255.57")
         cfg["web"]["url"] = f"http://{host}:8080/"
+    if "input_device" not in cfg["agent"]:
+        cfg["agent"]["input_device"] = ""
     return cfg
 
 
@@ -360,6 +362,21 @@ class AgentMQTT:
             self.client.disconnect()
         except Exception:
             pass
+
+
+def list_input_devices():
+    """Names of available input (microphone) devices, deduped, in order."""
+    try:
+        import sounddevice as sd
+        seen, out = set(), []
+        for d in sd.query_devices():
+            if d.get("max_input_channels", 0) > 0:
+                name = d.get("name", "")
+                if name and name not in seen:
+                    seen.add(name); out.append(name)
+        return out
+    except Exception:
+        return []
 
 
 # ── GUI ──────────────────────────────────────────────────────────────────────
@@ -618,10 +635,18 @@ class SettingsPage(QWidget):
         _w = agent.get("ww_word", "hey_jarvis")
         if self.ww_word.findText(_w) >= 0:
             self.ww_word.setCurrentText(_w)
+        self.mic = QComboBox()
+        self.mic.addItem("System default", "")
+        for _name in list_input_devices():
+            self.mic.addItem(_name, _name)
+        _cur = agent.get("input_device", "")
+        _mi = self.mic.findData(_cur)
+        self.mic.setCurrentIndex(_mi if _mi >= 0 else 0)
         form.addRow("Push-to-talk", self.ptt_enabled)
         form.addRow("Hold-to-talk hotkey", self.hotkey)
         form.addRow("Wake word", self.ww_enabled)
         form.addRow("Wake phrase", self.ww_word)
+        form.addRow("Microphone", self.mic)
         form.addRow("STT server URL", self.stt_url)
         form.addRow("Dashboard URL", self.web_url)
         lay.addLayout(form)
@@ -656,6 +681,7 @@ class SettingsPage(QWidget):
         self.cfg["agent"]["hotkey"] = self.hotkey.text().strip() or "ctrl+alt+j"
         self.cfg["agent"]["ww_enabled"] = "true" if self.ww_enabled.isChecked() else "false"
         self.cfg["agent"]["ww_word"] = self.ww_word.currentText().strip() or "hey_jarvis"
+        self.cfg["agent"]["input_device"] = self.mic.currentData() or ""
         if "stt" not in self.cfg:
             self.cfg["stt"] = {}
         self.cfg["stt"]["url"] = self.stt_url.text().strip() or "http://100.119.255.57:8080/api/stt"
@@ -930,6 +956,9 @@ class MainWindow(QMainWindow):
         self.bridge.update_result.connect(self.on_update_result)
 
         self.agent.start()
+        _devs = list_input_devices()
+        self.bridge.activity.emit("[MIC] inputs: " + (" | ".join(_devs) if _devs else "none detected"))
+        self.bridge.activity.emit(f"[MIC] using: {self._input_device() or 'system default'}")
         self.check_updates(manual=False)  # silent check on launch
         self._reconcile_ptt()
         self._reconcile_ww()
@@ -1023,7 +1052,8 @@ class MainWindow(QMainWindow):
         url = self.cfg["stt"].get("url", "http://100.119.255.57:8080/api/stt")
         hotkey = self.cfg["agent"].get("hotkey", "ctrl+alt+j")
         self.ptt_ctl = ptt.PushToTalk(stt_url=url, on_text=self._on_ptt_text,
-                                      on_status=self._on_ptt_status, hotkey=hotkey)
+                                      on_status=self._on_ptt_status, hotkey=hotkey,
+                                      input_device=self._input_device())
         self.ptt_ctl.start()
 
     # ── wake word ──
@@ -1051,8 +1081,13 @@ class MainWindow(QMainWindow):
         url = self.cfg["stt"].get("url", "http://100.119.255.57:8080/api/stt")
         word = self.cfg["agent"].get("ww_word", "hey_jarvis")
         self.ww_ctl = ww.WakeWord(model=word, stt_url=url, on_wake_text=self._on_ww_text,
-                                  on_status=self._on_ww_status)
+                                  on_status=self._on_ww_status,
+                                  input_device=self._input_device())
         self.ww_ctl.start()
+
+    def _input_device(self):
+        name = (self.cfg["agent"].get("input_device", "") or "").strip()
+        return name or None
 
     def closeEvent(self, event):
         for ctl in (self.ptt_ctl, self.ww_ctl):

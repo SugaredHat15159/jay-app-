@@ -74,7 +74,7 @@ def rms_int16(frame):
 class WakeWord:
     def __init__(self, model, stt_url, on_wake_text, on_status,
                  threshold=0.5, cooldown=2.5, silence_rms=350.0,
-                 quiet_ms=1200, max_capture_s=10.0):
+                 quiet_ms=1200, max_capture_s=10.0, input_device=None):
         self.model = model                      # key or path
         self.stt_url = stt_url
         self.on_wake_text = on_wake_text         # called with transcribed text
@@ -84,6 +84,7 @@ class WakeWord:
         self.silence_rms = float(silence_rms)
         self.quiet_ms = int(quiet_ms)
         self.max_capture_s = float(max_capture_s)
+        self.input_device = input_device         # None = system default
         self._stop = threading.Event()
         self._thread = None
         self.running = False
@@ -130,7 +131,8 @@ class WakeWord:
         last_fire = 0.0
         try:
             with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
-                                dtype="int16", blocksize=CHUNK) as stream:
+                                dtype="int16", blocksize=CHUNK,
+                                device=self.input_device) as stream:
                 while not self._stop.is_set():
                     data, _ = stream.read(CHUNK)
                     frame = data.reshape(-1)

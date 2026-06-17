@@ -72,12 +72,13 @@ def frames_to_wav(frames, sample_rate=SAMPLE_RATE):
 
 # ── the controller ───────────────────────────────────────────────────────────
 class PushToTalk:
-    def __init__(self, stt_url, on_text, on_status, hotkey="ctrl+alt+j"):
+    def __init__(self, stt_url, on_text, on_status, hotkey="ctrl+alt+j", input_device=None):
         self.stt_url = stt_url
         self.on_text = on_text          # called with transcribed text
         self.on_status = on_status      # called with status strings (for Activity log)
         self.hotkey_spec = hotkey
         self.hotkey = parse_hotkey(hotkey)
+        self.input_device = input_device  # None = system default; else device name/index
         self._pressed = set()
         self._recording = False
         self._frames = []
@@ -122,6 +123,9 @@ class PushToTalk:
         self.hotkey_spec = spec
         self.hotkey = parse_hotkey(spec)
 
+    def set_device(self, device):
+        self.input_device = device
+
     def _on_press(self, key):
         self._pressed.add(self._norm(key))
         if not self._recording and combo_satisfied(self._pressed, self.hotkey):
@@ -149,7 +153,8 @@ class PushToTalk:
 
         try:
             self._stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
-                                          dtype="int16", callback=cb)
+                                          dtype="int16", callback=cb,
+                                          device=self.input_device)
             self._stream.start()
             self.on_status("Listening\u2026 (push-to-talk)")
         except Exception as exc:
