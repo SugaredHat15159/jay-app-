@@ -248,7 +248,9 @@ STATE_TOPICS = ("timer",)  # retained skill/<x>/state topics the dashboards rend
 class AgentMQTT:
     def __init__(self, cfg, bridge: Bridge, mappings_ref):
         self.bridge = bridge
-        self.mappings_ref = mappings_ref          # callable returning current list
+        self.mappings_ref = mappings_ref          # callable returning current LOCAL list
+        self._global = []                          # from retained skill/globalmap/state
+        self._global_lock = threading.Lock()
         self.cfg = cfg
         self.enabled = True
         self.client = None
@@ -282,6 +284,7 @@ class AgentMQTT:
             client.subscribe(f"pc/command/{self.name}", qos=1)  # this machine only
             for _skill in STATE_TOPICS:
                 client.subscribe(f"skill/{_skill}/state", qos=1)  # retained dashboards
+            client.subscribe("skill/globalmap/state", qos=1)      # shared open-X mappings
             self.bridge.status.emit(True, f"{self.host}:{self.port}")
             self.bridge.activity.emit(f"Connected as '{self.name}' -> pc/command/{self.name}")
             self._publish_status("online")
@@ -296,6 +299,16 @@ class AgentMQTT:
         topic = msg.topic
         # Retained dashboard state updates the UI regardless of the command toggle.
         if topic.startswith("skill/") and topic.endswith("/state"):
+            if topic == "skill/globalmap/state":
+                try:
+                    data = json.loads(msg.payload.decode() or "{}")
+                    gm = data.get("mappings", []) or []
+                except Exception:
+                    gm = []
+                with self._global_lock:
+                    self._global = gm
+                self.bridge.activity.emit(f"[MAP] global mappings updated ({len(gm)})")
+                return
             try:
                 self.bridge.skill_state.emit(topic.split("/")[1], msg.payload.decode() or "{}")
             except Exception:
@@ -310,9 +323,15 @@ class AgentMQTT:
         except Exception:
             self.bridge.activity.emit(f"Bad JSON: {msg.payload!r}")
             return
-        result = execute_command(payload, self.mappings_ref())
+        result = execute_command(payload, self._merged())
         self.bridge.activity.emit(f"{payload} -> {result}")
         self._publish_status(result)
+
+    def _merged(self):
+        """Local mappings win; global mappings fill in the rest (then domain fallback)."""
+        local = list(self.mappings_ref() or [])
+        with self._global_lock:
+            return local + list(self._global)
 
     def _publish_status(self, status: str):
         try:
