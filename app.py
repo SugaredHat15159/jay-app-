@@ -548,6 +548,33 @@ def dot_icon(color_hex: str) -> QIcon:
     return QIcon(pm)
 
 
+def persona_logo_icon(size: int = 64) -> QIcon:
+    """Dual-persona mark: rounded tile, left half orange 'J' (Jay),
+    right half blue 'N' (Nova). Used as the app / taskbar icon."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setPen(Qt.NoPen)
+    radius = size * 0.22
+    # whole tile orange, then paint the right half blue (clipped)
+    p.setBrush(QColor("#ff7a1a"))
+    p.drawRoundedRect(0, 0, size, size, radius, radius)
+    p.setClipRect(size // 2, 0, size - size // 2, size)
+    p.setBrush(QColor("#2f6bff"))
+    p.drawRoundedRect(0, 0, size, size, radius, radius)
+    p.setClipping(False)
+    # letters: J on the orange half, N on the blue half
+    f = QFont("Segoe UI", int(size * 0.40))
+    f.setBold(True)
+    p.setFont(f)
+    p.setPen(QColor("#ffffff"))
+    p.drawText(QRectF(0, 0, size / 2, size), Qt.AlignCenter, "J")
+    p.drawText(QRectF(size / 2, 0, size / 2, size), Qt.AlignCenter, "N")
+    p.end()
+    return QIcon(pm)
+
+
 class MappingsPage(QWidget):
     def __init__(self, get_mappings, set_mappings, get_globals=None):
         super().__init__()
@@ -1252,6 +1279,7 @@ def main():
         pass
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setWindowIcon(persona_logo_icon())
     app.setStyleSheet(QSS)
     win = MainWindow()
     win.apply_theme(win.cfg["ui"].get("theme", "dark"))
