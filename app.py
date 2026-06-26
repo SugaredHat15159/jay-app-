@@ -165,10 +165,26 @@ def save_mappings(mappings: list):
 def norm(s: str) -> str:
     return " ".join((s or "").lower().split())
 
+_TARGET_SUFFIXES = (
+    " on my computer", " on the computer", " on this computer", " on computer",
+    " on my laptop", " on the laptop", " on this laptop", " on laptop",
+    " on my pc", " on the pc", " on this pc", " on pc",
+    " on my desktop", " on the desktop", " on desktop",
+    " on my machine", " on the machine", " on machine",
+)
+
+def strip_target(key: str) -> str:
+    """Drop a trailing \"on <device>\" phrase the server may not have removed."""
+    k = key
+    for suf in _TARGET_SUFFIXES:
+        if k.endswith(suf):
+            return k[: -len(suf)].strip()
+    return k
+
 
 def resolve_object(obj: str, mappings: list):
     """Local mappings first; else treat as a domain. Returns (payload, friendly)."""
-    key = norm(obj)
+    key = strip_target(norm(obj))
     for m in mappings:
         if norm(m.get("phrase")) == key:
             kind = (m.get("kind") or "url").lower()
@@ -533,10 +549,11 @@ def dot_icon(color_hex: str) -> QIcon:
 
 
 class MappingsPage(QWidget):
-    def __init__(self, get_mappings, set_mappings):
+    def __init__(self, get_mappings, set_mappings, get_globals=None):
         super().__init__()
         self.get_mappings = get_mappings
         self.set_mappings = set_mappings
+        self.get_globals = get_globals or (lambda: [])
         lay = QVBoxLayout(self)
         lay.setContentsMargins(28, 24, 28, 24); lay.setSpacing(14)
         title = QLabel("Local Mappings"); title.setObjectName("PageTitle")
@@ -560,6 +577,30 @@ class MappingsPage(QWidget):
         save = QPushButton("Save"); save.clicked.connect(self.save)
         btns.addWidget(add); btns.addWidget(rem); btns.addStretch(1); btns.addWidget(save)
         lay.addLayout(btns)
+
+        gtitle = QLabel("Global (shared) mappings"); gtitle.setObjectName("PageTitle")
+        lay.addWidget(gtitle)
+        lay.addWidget(QLabel("Read-only \u2014 managed from the JAY website. Local entries above override these."))
+        self.gtable = QTableWidget(0, 3)
+        self.gtable.setHorizontalHeaderLabels(["Phrase", "Type", "Value"])
+        self.gtable.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.gtable.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
+        self.gtable.setColumnWidth(1, 140)
+        self.gtable.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.gtable.verticalHeader().setVisible(False)
+        self.gtable.verticalHeader().setDefaultSectionSize(40)
+        self.gtable.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.gtable.setSelectionMode(QAbstractItemView.NoSelection)
+        lay.addWidget(self.gtable)
+        _gm = list(self.get_globals() or [])
+        for m in _gm:
+            r = self.gtable.rowCount(); self.gtable.insertRow(r)
+            self.gtable.setItem(r, 0, QTableWidgetItem(m.get("phrase", "")))
+            self.gtable.setItem(r, 1, QTableWidgetItem((m.get("kind") or "url")))
+            self.gtable.setItem(r, 2, QTableWidgetItem(m.get("value", "")))
+        if not _gm:
+            self.gtable.insertRow(0)
+            self.gtable.setItem(0, 0, QTableWidgetItem("(none yet)"))
         self.reload()
 
     def _type_combo(self, current="url"):
@@ -1015,7 +1056,7 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def open_mappings(self):
-        page = MappingsPage(self.get_mappings, self.set_mappings)
+        page = MappingsPage(self.get_mappings, self.set_mappings, self.get_global_mappings)
         self._show_dialog("Mappings", page)
 
     def open_settings(self):
@@ -1042,6 +1083,13 @@ class MainWindow(QMainWindow):
     def get_mappings(self):
         with self._lock:
             return list(self._mappings)
+
+    def get_global_mappings(self):
+        try:
+            with self.agent._global_lock:
+                return list(self.agent._global)
+        except Exception:
+            return []
 
     def set_mappings(self, rows):
         with self._lock:
