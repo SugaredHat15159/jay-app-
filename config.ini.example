@@ -1,6 +1,6 @@
 [broker]
-host = 100.119.255.57
-port = 1884
+host = ip
+port = port
 username = jay-agent
 password = YOUR_BROKER_PASSWORD_HERE
 
