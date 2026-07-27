@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem, QStackedWidget, QLabel, QTableWidget, QTableWidgetItem,
     QPushButton, QComboBox, QLineEdit, QHeaderView, QFormLayout, QPlainTextEdit,
     QMessageBox, QAbstractItemView, QCheckBox, QFrame, QGridLayout, QScrollArea,
-    QSpinBox, QSizePolicy, QToolBar, QDialog,
+    QSpinBox, QSizePolicy, QToolBar, QDialog, QSystemTrayIcon, QMenu,
 )
 
 try:
@@ -121,7 +121,7 @@ def load_config() -> configparser.ConfigParser:
     if "ww_enabled" not in cfg["agent"]:
         cfg["agent"]["ww_enabled"] = "false"
     if "ww_word" not in cfg["agent"]:
-        cfg["agent"]["ww_word"] = "hey_jarvis"
+        cfg["agent"]["ww_word"] = "hey_jay"
     if "stt" not in cfg:
         cfg["stt"] = {"url": "http://100.119.255.57:8080/api/stt"}
     if "ui" not in cfg:
@@ -136,6 +136,8 @@ def load_config() -> configparser.ConfigParser:
         cfg["web"]["url"] = f"http://{host}:8080/"
     if "input_device" not in cfg["agent"]:
         cfg["agent"]["input_device"] = ""
+    if "background" not in cfg["agent"]:
+        cfg["agent"]["background"] = "false"
     return cfg
 
 
@@ -259,6 +261,7 @@ class Bridge(QObject):
 
 
 STATE_TOPICS = ("timer",)  # retained skill/<x>/state topics the dashboards render
+WW_PERSONA = {"hey_jay": "jay", "hey_nova": "nova"}  # wake word -> persona id
 
 
 class AgentMQTT:
@@ -377,6 +380,16 @@ class AgentMQTT:
             return True
         except Exception as exc:
             self.bridge.activity.emit(f"skill publish failed: {exc}")
+            return False
+
+    def publish_persona(self, pid: str):
+        """Switch the active JAY persona system-wide (config/persona)."""
+        try:
+            self.client.publish("config/persona",
+                                json.dumps({"persona": pid}), qos=1)
+            return True
+        except Exception as exc:
+            self.bridge.activity.emit(f"persona publish failed: {exc}")
             return False
 
     def set_enabled(self, on: bool):
@@ -717,9 +730,11 @@ class SettingsPage(QWidget):
         self.web_url = QLineEdit(cfg["web"].get("url", "http://100.119.255.57:8080/"))
         self.ww_enabled = QCheckBox("Enable wake word (always-on listening)")
         self.ww_enabled.setChecked(agent.get("ww_enabled", "false").lower() == "true")
+        self.background = QCheckBox("Keep listening after the window is closed (tray)")
+        self.background.setChecked(agent.get("background", "false").lower() == "true")
         self.ww_word = QComboBox()
-        self.ww_word.addItems(["hey_jarvis", "alexa", "hey_mycroft", "hey_rhasspy"])
-        _w = agent.get("ww_word", "hey_jarvis")
+        self.ww_word.addItems(["hey_jay", "hey_nova", "hey_jarvis", "alexa", "hey_mycroft", "hey_rhasspy"])
+        _w = agent.get("ww_word", "hey_jay")
         if self.ww_word.findText(_w) >= 0:
             self.ww_word.setCurrentText(_w)
         self.mic = QComboBox()
@@ -733,6 +748,7 @@ class SettingsPage(QWidget):
         form.addRow("Hold-to-talk hotkey", self.hotkey)
         form.addRow("Wake word", self.ww_enabled)
         form.addRow("Wake phrase", self.ww_word)
+        form.addRow("Run in background", self.background)
         form.addRow("Microphone", self.mic)
         form.addRow("STT server URL", self.stt_url)
         form.addRow("Dashboard URL", self.web_url)
@@ -767,7 +783,8 @@ class SettingsPage(QWidget):
         self.cfg["agent"]["ptt_enabled"] = "true" if self.ptt_enabled.isChecked() else "false"
         self.cfg["agent"]["hotkey"] = self.hotkey.text().strip() or "ctrl+alt+j"
         self.cfg["agent"]["ww_enabled"] = "true" if self.ww_enabled.isChecked() else "false"
-        self.cfg["agent"]["ww_word"] = self.ww_word.currentText().strip() or "hey_jarvis"
+        self.cfg["agent"]["ww_word"] = self.ww_word.currentText().strip() or "hey_jay"
+        self.cfg["agent"]["background"] = "true" if self.background.isChecked() else "false"
         self.cfg["agent"]["input_device"] = self.mic.currentData() or ""
         if "stt" not in self.cfg:
             self.cfg["stt"] = {}
@@ -1005,6 +1022,9 @@ class MainWindow(QMainWindow):
         self.agent = AgentMQTT(self.cfg, self.bridge, self.get_mappings)
         self.ptt_ctl = None
         self.ww_ctl = None
+        self._force_quit = False
+        self.tray = None
+        self._act_ww = None
 
         # toolbar holds the app-only actions; the website fills the rest of the window
         tb = QToolBar(); tb.setObjectName("TopBar"); tb.setMovable(False)
@@ -1042,6 +1062,7 @@ class MainWindow(QMainWindow):
         self.bridge.activity.connect(self._on_activity)
         self.bridge.update_result.connect(self.on_update_result)
 
+        self._build_tray()
         self.agent.start()
         _devs = list_input_devices()
         self.bridge.activity.emit("[MIC] inputs: " + (" | ".join(_devs) if _devs else "none detected"))
@@ -1126,6 +1147,7 @@ class MainWindow(QMainWindow):
         self.agent.apply_config(cfg)
         self._reconcile_ptt()
         self._reconcile_ww()
+        self._sync_tray_ww()
         self._reload_web()
 
     # ── push-to-talk ──
@@ -1165,6 +1187,11 @@ class MainWindow(QMainWindow):
         if self.agent.publish_stt(text):
             self.bridge.activity.emit(f'[WW] -> stt/text (source=pc): "{text}"')
 
+    def _on_ww_detected(self, word):
+        pid = WW_PERSONA.get(word)
+        if pid and self.agent.publish_persona(pid):
+            self.bridge.activity.emit(f"[WW] persona -> {pid}")
+
     def _reconcile_ww(self):
         enabled = self.cfg["agent"].get("ww_enabled", "false").lower() == "true"
         # Always tear down first: stops the thread, closes the mic, frees the model.
@@ -1180,9 +1207,9 @@ class MainWindow(QMainWindow):
             self.bridge.activity.emit("[WW] unavailable in this build")
             return
         url = self.cfg["stt"].get("url", "http://100.119.255.57:8080/api/stt")
-        word = self.cfg["agent"].get("ww_word", "hey_jarvis")
+        word = self.cfg["agent"].get("ww_word", "hey_jay")
         self.ww_ctl = ww.WakeWord(model=word, stt_url=url, on_wake_text=self._on_ww_text,
-                                  on_status=self._on_ww_status,
+                                  on_status=self._on_ww_status, on_wake=self._on_ww_detected,
                                   input_device=self._input_device())
         self.ww_ctl.start()
 
@@ -1190,7 +1217,7 @@ class MainWindow(QMainWindow):
         name = (self.cfg["agent"].get("input_device", "") or "").strip()
         return name or None
 
-    def closeEvent(self, event):
+    def _teardown(self):
         for ctl in (self.ptt_ctl, self.ww_ctl):
             if ctl is not None:
                 try:
@@ -1201,7 +1228,88 @@ class MainWindow(QMainWindow):
             self.agent.stop()
         except Exception:
             pass
+
+    def _background_enabled(self):
+        return self.cfg["agent"].get("background", "false").lower() == "true"
+
+    def closeEvent(self, event):
+        if self._background_enabled() and not self._force_quit and self.tray is not None:
+            event.ignore()
+            self.hide()
+            if not getattr(self, "_bg_notice_shown", False):
+                self._bg_notice_shown = True
+                try:
+                    self.tray.showMessage(
+                        APP_NAME,
+                        "Still listening in the background. Right-click the tray icon to quit.",
+                        QSystemTrayIcon.Information, 4000)
+                except Exception:
+                    pass
+            return
+        self._teardown()
+        if self.tray is not None:
+            try:
+                self.tray.hide()
+            except Exception:
+                pass
         super().closeEvent(event)
+        QApplication.quit()
+
+    def _build_tray(self):
+        try:
+            if not QSystemTrayIcon.isSystemTrayAvailable():
+                self.bridge.activity.emit("[TRAY] system tray unavailable")
+                return
+        except Exception:
+            return
+        self.tray = QSystemTrayIcon(persona_logo_icon(), self)
+        self.tray.setToolTip(APP_NAME)
+        menu = QMenu()
+        self._act_show = QAction("Show JAY", self)
+        self._act_show.triggered.connect(self.show_window)
+        self._act_ww = QAction("Wake word", self, checkable=True)
+        self._act_ww.setChecked(self.cfg["agent"].get("ww_enabled", "false").lower() == "true")
+        self._act_ww.toggled.connect(self._toggle_ww_from_tray)
+        act_quit = QAction("Quit", self)
+        act_quit.triggered.connect(self.quit_app)
+        menu.addAction(self._act_show)
+        menu.addAction(self._act_ww)
+        menu.addSeparator()
+        menu.addAction(act_quit)
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(self._tray_activated)
+        self.tray.show()
+
+    def _tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            self.show_window()
+
+    def show_window(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _toggle_ww_from_tray(self, on):
+        self.cfg["agent"]["ww_enabled"] = "true" if on else "false"
+        save_config(self.cfg)
+        self._reconcile_ww()
+
+    def _sync_tray_ww(self):
+        if self._act_ww is not None:
+            on = self.cfg["agent"].get("ww_enabled", "false").lower() == "true"
+            self._act_ww.blockSignals(True)
+            self._act_ww.setChecked(on)
+            self._act_ww.blockSignals(False)
+
+    def quit_app(self):
+        self._force_quit = True
+        self._teardown()
+        if self.tray is not None:
+            try:
+                self.tray.hide()
+            except Exception:
+                pass
+        QApplication.quit()
 
     def apply_theme(self, name):
         QApplication.instance().setStyleSheet(build_qss(name))
@@ -1279,6 +1387,7 @@ def main():
         pass
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setQuitOnLastWindowClosed(False)  # PATCH: ww-background-v1
     app.setWindowIcon(persona_logo_icon())
     app.setStyleSheet(QSS)
     win = MainWindow()
@@ -1289,3 +1398,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# PATCH: ww-persona-v1

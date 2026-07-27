@@ -26,6 +26,8 @@ CHUNK = 1280  # 80 ms; openWakeWord's native frame size
 
 # Map a friendly wake-word key to its bundled model filename.
 MODEL_FILES = {
+    "hey_jay": "hey_jay.onnx",
+    "hey_nova": "hey_nova.onnx",
     "hey_jarvis": "hey_jarvis_v0.1.onnx",
     "alexa": "alexa_v0.1.onnx",
     "hey_mycroft": "hey_mycroft_v0.1.onnx",
@@ -74,10 +76,12 @@ def rms_int16(frame):
 class WakeWord:
     def __init__(self, model, stt_url, on_wake_text, on_status,
                  threshold=0.5, cooldown=2.5, silence_rms=350.0,
-                 quiet_ms=1200, max_capture_s=10.0, input_device=None):
+                 quiet_ms=1200, max_capture_s=10.0, input_device=None,
+                 on_wake=None):
         self.model = model                      # key or path
         self.stt_url = stt_url
         self.on_wake_text = on_wake_text         # called with transcribed text
+        self.on_wake = on_wake                   # called with the fired model key
         self.on_status = on_status               # called with status strings
         self.threshold = float(threshold)
         self.cooldown = float(cooldown)
@@ -145,6 +149,11 @@ class WakeWord:
                     if conf >= self.threshold and (now - last_fire) > self.cooldown:
                         last_fire = now
                         self.on_status("Wake word detected")
+                        if self.on_wake:
+                            try:
+                                self.on_wake(self.model)
+                            except Exception:
+                                pass
                         self._capture(stream)
                         # reset detector state so the just-spoken tail can't re-fire
                         try:
@@ -197,3 +206,5 @@ class WakeWord:
             self.on_wake_text(text)
         else:
             self.on_status("(didn't catch that)")
+
+# PATCH: ww-persona-v1
