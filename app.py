@@ -303,6 +303,7 @@ class AgentMQTT:
         if rc == 0:
             client.subscribe("pc/command", qos=1)               # shared / broadcast
             client.subscribe(f"pc/command/{self.name}", qos=1)  # this machine only
+            client.subscribe("tts/audio", qos=1)                # real TTS from server
             for _skill in STATE_TOPICS:
                 client.subscribe(f"skill/{_skill}/state", qos=1)  # retained dashboards
             client.subscribe("skill/globalmap/state", qos=1)      # shared open-X mappings
@@ -334,6 +335,9 @@ class AgentMQTT:
                 self.bridge.skill_state.emit(topic.split("/")[1], msg.payload.decode() or "{}")
             except Exception:
                 pass
+            return
+        if topic == "tts/audio":
+            self._play_audio(msg.payload)
             return
         if not self.enabled:
             return
@@ -393,6 +397,18 @@ class AgentMQTT:
         except Exception as exc:
             self.bridge.activity.emit(f"persona publish failed: {exc}")
             return False
+
+    def _play_audio(self, wav_bytes):
+        """Play WAV bytes via sounddevice."""
+        try:
+            import sounddevice as sd
+            import wave, io
+            wav_io = io.BytesIO(wav_bytes)
+            with wave.open(wav_io, "rb") as wav:
+                frames = wav.readframes(wav.getnframes())
+                sd.play(frames, samplerate=wav.getframerate())
+        except Exception:
+            pass
 
     def set_enabled(self, on: bool):
         self.enabled = on
