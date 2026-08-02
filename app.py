@@ -138,6 +138,8 @@ def load_config() -> configparser.ConfigParser:
         cfg["agent"]["input_device"] = ""
     if "background" not in cfg["agent"]:
         cfg["agent"]["background"] = "false"
+    if "tts_enabled" not in cfg["agent"]:
+        cfg["agent"]["tts_enabled"] = "false"
     return cfg
 
 
@@ -732,6 +734,8 @@ class SettingsPage(QWidget):
         self.ww_enabled.setChecked(agent.get("ww_enabled", "false").lower() == "true")
         self.background = QCheckBox("Keep listening after the window is closed (tray)")
         self.background.setChecked(agent.get("background", "false").lower() == "true")
+        self.tts_enabled = QCheckBox("Enable TTS playback (while backgrounded)")
+        self.tts_enabled.setChecked(agent.get("tts_enabled", "false").lower() == "true")
         self.ww_word = QComboBox()
         self.ww_word.addItems(["hey_jay", "hey_nova", "hey_jarvis", "alexa", "hey_mycroft", "hey_rhasspy"])
         _w = agent.get("ww_word", "hey_jay")
@@ -749,6 +753,7 @@ class SettingsPage(QWidget):
         form.addRow("Wake word", self.ww_enabled)
         form.addRow("Wake phrase", self.ww_word)
         form.addRow("Run in background", self.background)
+        form.addRow("TTS playback", self.tts_enabled)
         form.addRow("Microphone", self.mic)
         form.addRow("STT server URL", self.stt_url)
         form.addRow("Dashboard URL", self.web_url)
@@ -785,6 +790,7 @@ class SettingsPage(QWidget):
         self.cfg["agent"]["ww_enabled"] = "true" if self.ww_enabled.isChecked() else "false"
         self.cfg["agent"]["ww_word"] = self.ww_word.currentText().strip() or "hey_jay"
         self.cfg["agent"]["background"] = "true" if self.background.isChecked() else "false"
+        self.cfg["agent"]["tts_enabled"] = "true" if self.tts_enabled.isChecked() else "false"
         self.cfg["agent"]["input_device"] = self.mic.currentData() or ""
         if "stt" not in self.cfg:
             self.cfg["stt"] = {}
