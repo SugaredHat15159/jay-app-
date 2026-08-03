@@ -403,13 +403,15 @@ class AgentMQTT:
         try:
             import sounddevice as sd
             import wave, io
+            import numpy as np
             self.bridge.activity.emit(f"[TTS] Received {len(wav_bytes)} bytes")
             wav_io = io.BytesIO(wav_bytes)
             with wave.open(wav_io, "rb") as wav:
                 frames = wav.readframes(wav.getnframes())
                 sr = wav.getframerate()
-                self.bridge.activity.emit(f"[TTS] Playing {len(frames)} frames @ {sr}Hz")
-                sd.play(frames, samplerate=sr)
+                audio = np.frombuffer(frames, dtype=np.int16)
+                self.bridge.activity.emit(f"[TTS] Playing {len(audio)} frames @ {sr}Hz")
+                sd.play(audio, samplerate=sr)
         except Exception as e:
             self.bridge.activity.emit(f"[TTS] Error: {e}")
 
