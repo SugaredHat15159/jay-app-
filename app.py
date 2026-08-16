@@ -337,7 +337,8 @@ class AgentMQTT:
                 pass
             return
         if topic == "tts/audio":
-            self._play_audio(msg.payload)
+            if self.cfg["agent"].get("tts_enabled", "false").lower() == "true":
+                self._play_audio(msg.payload)
             return
         if not self.enabled:
             return
