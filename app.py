@@ -9,6 +9,8 @@ Command actions understood on pc/command:
   {"action":"run_script","script":"..."}   - run a script/command line
   {"action":"open","object":"youtube"}     - resolve via LOCAL mappings, then run
   {"action":"ping"}                         - reply pong on pc/status
+  {"action":"screen_capture",...}           - grab screen in RAM -> reply_topic (screen-vision-v1)
+  {"action":"input","input":{...}}          - mouse/keyboard (only if control_enabled)
 """
 
 import configparser
@@ -63,6 +65,11 @@ try:
     import ww
 except Exception:
     ww = None
+
+try:
+    import screen as jay_screen  # screen-vision-v1
+except Exception:
+    jay_screen = None
 
 # Named mutex so the installer (Inno AppMutex=JayPcAgentMutex) can detect/close
 # a running instance during auto-update, and to enforce single-instance.
@@ -140,6 +147,10 @@ def load_config() -> configparser.ConfigParser:
         cfg["agent"]["background"] = "false"
     if "tts_enabled" not in cfg["agent"]:
         cfg["agent"]["tts_enabled"] = "false"
+    if "screen_enabled" not in cfg["agent"]:  # screen-vision-v1
+        cfg["agent"]["screen_enabled"] = "true"
+    if "control_enabled" not in cfg["agent"]:
+        cfg["agent"]["control_enabled"] = "false"
     return cfg
 
 
@@ -349,9 +360,61 @@ class AgentMQTT:
         except Exception:
             self.bridge.activity.emit(f"Bad JSON: {msg.payload!r}")
             return
+        _act = (payload.get("action") or "").strip().lower()
+        if _act in ("screen_capture", "input"):  # screen-vision-v1
+            threading.Thread(target=self._screen_action, args=(_act, payload),
+                             daemon=True).start()
+            return
         result = execute_command(payload, self._merged())
         self.bridge.activity.emit(f"{payload} -> {result}")
         self._publish_status(result)
+
+    def _screen_action(self, act, payload):  # screen-vision-v1
+        """Capture (RAM only, QoS0, never retained) or run a gated input action."""
+        agent = self.cfg["agent"]
+        if act == "screen_capture":
+            topic = str(payload.get("reply_topic") or "")
+            if not topic.startswith("pc/screen/frame/"):
+                self.bridge.activity.emit(f"[SCREEN] refused odd reply topic {topic!r}")
+                return
+            if jay_screen is None:
+                reply = {"ok": False, "error": "screen module missing in this build"}
+            elif agent.get("screen_enabled", "true").lower() != "true":
+                reply = {"ok": False, "error": "screen sharing disabled"}
+            else:
+                try:
+                    reply = jay_screen.capture(int(payload.get("max_side", 1920)),
+                                               int(payload.get("quality", 80)),
+                                               str(payload.get("monitor") or "active"))
+                except Exception as exc:
+                    reply = {"ok": False, "error": str(exc)[:200]}
+            reply["req_id"] = payload.get("req_id")
+            reply["name"] = self.name
+            try:
+                self.client.publish(topic, json.dumps(reply), qos=0, retain=False)
+            except Exception as exc:
+                self.bridge.activity.emit(f"[SCREEN] send failed: {exc}")
+            if reply.get("ok"):
+                self.bridge.activity.emit(
+                    f"[SCREEN] sent {reply['width']}x{reply['height']} of "
+                    f"'{reply.get('app') or '?'}' ({reply['bytes'] // 1024} KB) - not saved")
+            else:
+                self.bridge.activity.emit(f"[SCREEN] {reply.get('error')}")
+            reply = None
+            return
+        if agent.get("control_enabled", "false").lower() != "true":
+            self.bridge.activity.emit("[CONTROL] refused: remote control is off in Settings")
+            self._publish_status("input refused: control disabled")
+            return
+        if jay_screen is None:
+            self._publish_status("error: screen module missing")
+            return
+        try:
+            res = jay_screen.perform_input(payload.get("input") or {})
+        except Exception as exc:
+            res = f"error: {exc}"
+        self.bridge.activity.emit(f"[CONTROL] {res}")
+        self._publish_status(res)
 
     def _merged(self):
         """Local mappings win; global mappings fill in the rest (then domain fallback)."""
@@ -758,6 +821,10 @@ class SettingsPage(QWidget):
         self.background.setChecked(agent.get("background", "false").lower() == "true")
         self.tts_enabled = QCheckBox("Enable TTS playback (while backgrounded)")
         self.tts_enabled.setChecked(agent.get("tts_enabled", "false").lower() == "true")
+        self.screen_enabled = QCheckBox("Let JAY see this screen when asked (nothing is saved)")  # screen-vision-v1
+        self.screen_enabled.setChecked(agent.get("screen_enabled", "true").lower() == "true")
+        self.control_enabled = QCheckBox("Allow JAY to move the mouse and type")
+        self.control_enabled.setChecked(agent.get("control_enabled", "false").lower() == "true")
         self.ww_word = QComboBox()
         self.ww_word.addItems(["hey_jay", "hey_nova", "hey_jarvis", "alexa", "hey_mycroft", "hey_rhasspy"])
         _w = agent.get("ww_word", "hey_jay")
@@ -776,6 +843,8 @@ class SettingsPage(QWidget):
         form.addRow("Wake phrase", self.ww_word)
         form.addRow("Run in background", self.background)
         form.addRow("TTS playback", self.tts_enabled)
+        form.addRow("Screen vision", self.screen_enabled)
+        form.addRow("Remote control", self.control_enabled)
         form.addRow("Microphone", self.mic)
         form.addRow("STT server URL", self.stt_url)
         form.addRow("Dashboard URL", self.web_url)
@@ -813,6 +882,8 @@ class SettingsPage(QWidget):
         self.cfg["agent"]["ww_word"] = self.ww_word.currentText().strip() or "hey_jay"
         self.cfg["agent"]["background"] = "true" if self.background.isChecked() else "false"
         self.cfg["agent"]["tts_enabled"] = "true" if self.tts_enabled.isChecked() else "false"
+        self.cfg["agent"]["screen_enabled"] = "true" if self.screen_enabled.isChecked() else "false"
+        self.cfg["agent"]["control_enabled"] = "true" if self.control_enabled.isChecked() else "false"
         self.cfg["agent"]["input_device"] = self.mic.currentData() or ""
         if "stt" not in self.cfg:
             self.cfg["stt"] = {}

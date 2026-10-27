@@ -51,6 +51,10 @@ a = Analysis(
         'PySide6.QtQml',
         'PySide6.QtOpenGL',
         'PySide6.QtPositioning',
+        'screen',  # screen-vision-v1
+        'mss', 'mss.windows',
+        'PIL.Image', 'PIL.JpegImagePlugin',
+        'pynput.keyboard', 'pynput.mouse',
     ],
     hookspath=[],
     runtime_hooks=[],
